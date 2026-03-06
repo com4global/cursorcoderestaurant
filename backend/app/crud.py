@@ -95,6 +95,18 @@ def attach_order_to_session(db: Session, session: ChatSession, order: Order) -> 
 def add_order_item(
     db: Session, order: Order, menu_item: MenuItem, quantity: int
 ) -> OrderItem:
+    # Check if this item already exists in the order — if so, increment quantity
+    existing = (
+        db.query(OrderItem)
+        .filter(OrderItem.order_id == order.id, OrderItem.menu_item_id == menu_item.id)
+        .first()
+    )
+    if existing:
+        existing.quantity += quantity
+        db.commit()
+        db.refresh(existing)
+        return existing
+
     item = OrderItem(
         order_id=order.id,
         menu_item_id=menu_item.id,

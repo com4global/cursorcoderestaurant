@@ -323,11 +323,12 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                     order = crud.create_order(db, session.user_id, session.restaurant_id)
                     crud.attach_order_to_session(db, session, order)
 
-            crud.add_order_item(db, order, menu_item, quantity)
+            order_item = crud.add_order_item(db, order, menu_item, quantity)
             crud.recompute_order_total(db, order)
             total = f"${order.total_cents / 100:.2f}"
+            qty_msg = f" Now {order_item.quantity}x in cart." if order_item.quantity > 1 else ""
             return _result(
-                f"Added {quantity}x {menu_item.name}! Cart total: {total}",
+                f"Added {quantity}x {menu_item.name}!{qty_msg} Cart total: {total}",
                 restaurant_id=session.restaurant_id,
                 order_id=order.id,
             )

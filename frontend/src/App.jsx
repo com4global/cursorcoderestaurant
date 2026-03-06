@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { listRestaurants, fetchNearby, login, register, sendMessage } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
 
@@ -363,22 +364,34 @@ export default function App() {
       </div>
 
       <header className="hero">
-        <div>
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6, ease: "easeOut" }}
+        >
           <p className="badge">One chat for every restaurant</p>
           <h1>RestarentAI</h1>
           <p className="subtitle">
             A fast, single-chat ordering platform for nearby restaurants.
             No endless apps, no extra fees.
           </p>
-        </div>
+        </motion.div>
         <div className="hero-card">
           {/* Partnered restaurants */}
           {restaurants.length > 0 && (
             <>
               <h2>🟢 Order Now</h2>
               <ul>
-                {restaurants.map((r) => (
-                  <li key={r.id} onClick={() => token && selectRestaurant(r)} style={{ cursor: token ? "pointer" : "default" }}>
+                {restaurants.map((r, idx) => (
+                  <motion.li
+                    key={r.id}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: idx * 0.1, duration: 0.4 }}
+                    whileHover={{ scale: 1.02, x: 6 }}
+                    onClick={() => token && selectRestaurant(r)}
+                    style={{ cursor: token ? "pointer" : "default" }}
+                  >
                     <div className="restaurant-info">
                       <strong>{r.name}</strong>
                       {r.city && <span className="restaurant-city">{r.city}</span>}
@@ -389,7 +402,7 @@ export default function App() {
                       )}
                       <span className="restaurant-slug">#{r.slug}</span>
                     </div>
-                  </li>
+                  </motion.li>
                 ))}
               </ul>
             </>
@@ -404,7 +417,14 @@ export default function App() {
           ) : (
             <ul>
               {nearbyPlaces.map((p, i) => (
-                <li key={`nearby-${i}`} className="nearby-item">
+                <motion.li
+                  key={`nearby-${i}`}
+                  className="nearby-item"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: i * 0.08, duration: 0.35 }}
+                  whileHover={{ scale: 1.02, x: 6 }}
+                >
                   <div className="restaurant-info">
                     <strong>{p.name}</strong>
                     <span className="restaurant-city">
@@ -415,7 +435,7 @@ export default function App() {
                   <div className="restaurant-meta">
                     <span className="restaurant-distance">{p.distance_miles} mi</span>
                   </div>
-                </li>
+                </motion.li>
               ))}
             </ul>
           )}
@@ -454,31 +474,61 @@ export default function App() {
             <div className="chat-window">
               {messages.map((msg, idx) => (
                 <div key={idx}>
-                  {/* Hide system commands like add:1:1 */}
                   {msg.role === "user" && msg.content.startsWith("add:") ? null : (
-                    <div className={`bubble ${msg.role}`}>{renderContent(msg.content)}</div>
+                    <motion.div
+                      className={`bubble ${msg.role}`}
+                      initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      transition={{ duration: 0.3 }}
+                    >{renderContent(msg.content)}</motion.div>
                   )}
                   {msg.categories && (
-                    <div className="chips-row">
-                      {msg.categories.map((cat) => (
-                        <button key={cat.id} className="chip" onClick={() => handleCategoryClick(cat)}>
+                    <motion.div
+                      className="chips-row"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      transition={{ duration: 0.4, delay: 0.1 }}
+                    >
+                      {msg.categories.map((cat, ci) => (
+                        <motion.button
+                          key={cat.id}
+                          className="chip"
+                          onClick={() => handleCategoryClick(cat)}
+                          initial={{ opacity: 0, scale: 0.8 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          transition={{ delay: ci * 0.06, duration: 0.3 }}
+                          whileHover={{ scale: 1.08 }}
+                          whileTap={{ scale: 0.95 }}
+                        >
                           <span className="chip-name">{cat.name}</span>
                           <span className="chip-count">{cat.item_count}</span>
-                        </button>
+                        </motion.button>
                       ))}
-                    </div>
+                    </motion.div>
                   )}
                   {msg.items && (
                     <div className="items-grid">
-                      {msg.items.map((item) => (
-                        <div key={item.id} className="item-card">
+                      {msg.items.map((item, ii) => (
+                        <motion.div
+                          key={item.id}
+                          className="item-card"
+                          initial={{ opacity: 0, x: -15 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          transition={{ delay: ii * 0.05, duration: 0.3 }}
+                          whileHover={{ scale: 1.02 }}
+                        >
                           <div className="item-info">
                             <span className="item-name">{item.name}</span>
                             {item.description && <span className="item-desc">{item.description}</span>}
                             <span className="item-price">${(item.price_cents / 100).toFixed(2)}</span>
                           </div>
-                          <button className="add-btn" onClick={() => handleAddItem(item)}>+</button>
-                        </div>
+                          <motion.button
+                            className="add-btn"
+                            onClick={() => handleAddItem(item)}
+                            whileHover={{ scale: 1.2 }}
+                            whileTap={{ scale: 0.9 }}
+                          >+</motion.button>
+                        </motion.div>
                       ))}
                     </div>
                   )}
