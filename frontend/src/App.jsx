@@ -444,18 +444,27 @@ export default function App() {
 
       <main className="content">
         {!token ? (
-          <section className="auth">
-            <h2>{mode === "login" ? "Sign in" : "Create account"}</h2>
+          <motion.section
+            className="auth"
+            initial={{ opacity: 0, y: 30 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, ease: "easeOut" }}
+          >
+            <h2>{mode === "login" ? "👋 Welcome back" : "🚀 Get started"}</h2>
             <form onSubmit={handleAuth}>
-              <label>Email<input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required /></label>
-              <label>Password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required minLength={6} /></label>
-              <button type="submit">{mode === "login" ? "Sign in" : "Register"}</button>
+              <label>Email<input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required placeholder="you@example.com" /></label>
+              <label>Password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required minLength={6} placeholder="••••••••" /></label>
+              <motion.button
+                type="submit"
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.97 }}
+              >{mode === "login" ? "Sign in" : "Create account"}</motion.button>
             </form>
             <button className="ghost" onClick={() => setMode(mode === "login" ? "register" : "login")}>
               {mode === "login" ? "Need an account?" : "Already have an account?"}
             </button>
             {status !== "Ready." && <p className="status-msg">{status}</p>}
-          </section>
+          </motion.section>
         ) : (
           <section className="chat">
             <div className="chat-header">
