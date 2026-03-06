@@ -1,4 +1,11 @@
 
+import json as _json
+import os
+import urllib.request
+import urllib.error
+
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -363,9 +370,6 @@ def get_me(current_user=Depends(get_current_user)):
 # AI Menu Extraction (Phase 3 integrated into Phase 2)
 # =============================================================
 
-from bs4 import BeautifulSoup
-import os
-
 @app.post("/owner/import-menu")
 def import_menu_from_url(
     payload: dict,
@@ -398,7 +402,6 @@ def import_menu_from_url(
     text = text[:8000]
 
     # 3. Send to OpenAI for extraction
-    from dotenv import load_dotenv
     load_dotenv()
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key:
