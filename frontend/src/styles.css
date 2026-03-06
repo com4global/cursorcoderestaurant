@@ -641,6 +641,11 @@ h1 {
   box-shadow: 0 4px 16px var(--accent-glow);
 }
 
+.chip-emoji {
+  font-size: 1rem;
+  line-height: 1;
+}
+
 .chip-name {}
 
 .chip-count {
@@ -665,12 +670,29 @@ h1 {
 .item-card {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 14px;
   padding: 14px 18px;
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--border);
   transition: all 0.25s;
+}
+
+.item-emoji {
+  width: 42px;
+  height: 42px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  font-size: 1.3rem;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border);
+}
+
+.item-info {
+  flex: 1;
 }
 
 .item-card:hover {

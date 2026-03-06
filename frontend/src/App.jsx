@@ -5,6 +5,61 @@ import OwnerPortal from "./OwnerPortal.jsx";
 
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
 
+// Smart food emoji mapper
+const FOOD_EMOJI_MAP = [
+  [/pizza|pie|margherita|pepperoni|calzone|supreme/i, "🍕"],
+  [/burger|hamburger|cheeseburger/i, "🍔"],
+  [/fries|french fries|potato/i, "🍟"],
+  [/hot ?dog/i, "🌭"],
+  [/taco/i, "🌮"],
+  [/burrito|wrap|quesadilla/i, "🌯"],
+  [/salad|caesar|garden|coleslaw/i, "🥗"],
+  [/soup|chowder|bisque|stew/i, "🍲"],
+  [/steak|ribeye|filet|sirloin|beef/i, "🥩"],
+  [/chicken|wing|tender|nugget|poultry/i, "🍗"],
+  [/fish|salmon|tuna|cod|shrimp|seafood|lobster|crab/i, "🐟"],
+  [/sushi|sashimi|maki|roll/i, "🍣"],
+  [/ramen|noodle|pho|udon|lo mein|pad thai/i, "🍜"],
+  [/rice|fried rice|biryani|risotto/i, "🍚"],
+  [/pasta|spaghetti|penne|linguine|fettuccine|mac/i, "🍝"],
+  [/sandwich|sub|panini|club|blt|hoagie/i, "🥪"],
+  [/bread|toast|baguette|roll|biscuit|garlic bread/i, "🍞"],
+  [/cake|cheesecake|brownie|tiramisu/i, "🍰"],
+  [/ice cream|gelato|sundae|frozen/i, "🍨"],
+  [/cookie|biscuit/i, "🍪"],
+  [/donut|doughnut/i, "🍩"],
+  [/pie|cobbler|tart/i, "🥧"],
+  [/coffee|espresso|latte|cappuccino|mocha/i, "☕"],
+  [/tea|chai|matcha/i, "🍵"],
+  [/beer|ale|lager|ipa|stout/i, "🍺"],
+  [/wine|merlot|cabernet|chardonnay/i, "🍷"],
+  [/cocktail|martini|margarita|mojito/i, "🍸"],
+  [/juice|smoothie|lemonade/i, "🧃"],
+  [/soda|cola|sprite|pepsi|coke|drink|beverage/i, "🥤"],
+  [/water|sparkling/i, "💧"],
+  [/egg|omelet|omelette|benedict|scramble/i, "🍳"],
+  [/pancake|waffle|french toast|crepe/i, "🥞"],
+  [/cheese|mozzarella|cheddar|gouda/i, "🧀"],
+  [/nachos|chip|guac|salsa/i, "🫔"],
+  [/curry|tikka|masala|vindaloo/i, "🍛"],
+  [/bbq|barbecue|ribs|brisket|pulled pork|smoked/i, "🔥"],
+  [/corn|cob/i, "🌽"],
+  [/mushroom/i, "🍄"],
+  [/pepper|jalapeño|chili/i, "🌶️"],
+  [/tomato|marinara/i, "🍅"],
+  [/apple|fruit/i, "🍎"],
+  [/chocolate|cocoa/i, "🍫"],
+  [/catering/i, "📦"],
+];
+
+function getFoodEmoji(name = "", category = "") {
+  const text = `${name} ${category}`.toLowerCase();
+  for (const [regex, emoji] of FOOD_EMOJI_MAP) {
+    if (regex.test(text)) return emoji;
+  }
+  return "🍽️";
+}
+
 const welcomeMsg = {
   role: "bot",
   content: "Hello! Set your location above, then type # to pick a restaurant.",
@@ -509,6 +564,7 @@ export default function App() {
                           whileHover={{ scale: 1.08 }}
                           whileTap={{ scale: 0.95 }}
                         >
+                          <span className="chip-emoji">{getFoodEmoji(cat.name)}</span>
                           <span className="chip-name">{cat.name}</span>
                           <span className="chip-count">{cat.item_count}</span>
                         </motion.button>
@@ -526,6 +582,7 @@ export default function App() {
                           transition={{ delay: ii * 0.05, duration: 0.3 }}
                           whileHover={{ scale: 1.02 }}
                         >
+                          <span className="item-emoji">{getFoodEmoji(item.name)}</span>
                           <div className="item-info">
                             <span className="item-name">{item.name}</span>
                             {item.description && <span className="item-desc">{item.description}</span>}
