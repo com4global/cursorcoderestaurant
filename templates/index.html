@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Teacher Avatar Lip-Sync Generator</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 24px;
+      background: #020617;
+      color: #e5e7eb;
+      display: flex;
+      justify-content: center;
+    }
+    .container {
+      width: 100%;
+      max-width: 800px;
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 24px;
+    }
+    .card {
+      background: radial-gradient(circle at top left, #111827, #020617);
+      border-radius: 16px;
+      padding: 20px 22px;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      box-shadow: 0 20px 40px rgba(15, 23, 42, 0.7);
+      margin-top: 12px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 200px;
+      resize: vertical;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid #4b5563;
+      background: #020617;
+      color: #e5e7eb;
+      font-size: 14px;
+      line-height: 1.5;
+      box-sizing: border-box;
+      outline: none;
+    }
+    textarea:focus {
+      border-color: #6366f1;
+      box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.6);
+    }
+    button {
+      margin-top: 12px;
+      border: none;
+      border-radius: 999px;
+      padding: 8px 20px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      background: linear-gradient(135deg, #6366f1, #22c55e);
+      color: white;
+      box-shadow: 0 8px 20px rgba(79, 70, 229, 0.7);
+      transition: transform 0.1s ease, box-shadow 0.1s ease, filter 0.1s ease;
+    }
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 12px 24px rgba(79, 70, 229, 0.8);
+      filter: brightness(1.08);
+    }
+    .hint {
+      font-size: 13px;
+      color: #9ca3af;
+      margin-top: 8px;
+    }
+    .flash {
+      background: rgba(248, 113, 113, 0.1);
+      border: 1px solid rgba(248, 113, 113, 0.6);
+      color: #fecaca;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Teacher Avatar Lip-Sync Generator</h1>
+    <div class="hint">
+      Type your English script, click <strong>Generate Video</strong>, and the server will create a
+      lip-synced teacher video using your local Wav2Lip setup. No external APIs.
+    </div>
+
+    <div class="card">
+      {% with messages = get_flashed_messages() %}
+        {% if messages %}
+          {% for msg in messages %}
+            <div class="flash">{{ msg }}</div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      <form method="POST" action="{{ url_for('generate') }}">
+        <label for="script" style="font-size:14px; font-weight:500; display:block; margin-bottom:6px;">
+          Script
+        </label>
+        <textarea id="script" name="script" placeholder="Example:
+Welcome to Zenzee.com. We are excited to have you here. In this lesson, we will explore the basics and help you get started quickly."></textarea>
+
+        <button type="submit">Generate Video</button>
+      </form>
+
+      <div class="hint">
+        The backend expects your teacher/avatar video at <code>assets/teacher.mp4</code> relative to the project root.
+        You can replace that file to change the avatar.
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+

@@ -1,0 +1,64 @@
+# ============================
+# Python
+# ============================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+.env
+*.egg-info/
+dist/
+build/
+
+# ============================
+# Database
+# ============================
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+
+# ============================
+# Node / Frontend
+# ============================
+node_modules/
+.npm
+.yarn/
+dist/
+.cache/
+
+# ============================
+# IDE / Editor
+# ============================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ============================
+# OS
+# ============================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ============================
+# Misc
+# ============================
+outputs/
+*.log
+*.tmp
+.gemini/
+
+# ============================
+# Large model files (Wav2Lip)
+# ============================
+Wav2Lip/
+*.pth
+*.ckpt

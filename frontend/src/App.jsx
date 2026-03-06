@@ -1,0 +1,536 @@
+import { useEffect, useRef, useState, useCallback } from "react";
+import { listRestaurants, fetchNearby, login, register, sendMessage } from "./api.js";
+import OwnerPortal from "./OwnerPortal.jsx";
+
+const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
+
+const welcomeMsg = {
+  role: "bot",
+  content: "Hello! Set your location above, then type # to pick a restaurant.",
+};
+
+export default function App() {
+  const [mode, setMode] = useState("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [token, setToken] = useState(localStorage.getItem("token") || "");
+  const [messageText, setMessageText] = useState("");
+  const [messages, setMessages] = useState([welcomeMsg]);
+  const [sessionId, setSessionId] = useState(null);
+  const [restaurants, setRestaurants] = useState([]);
+  const [nearbyPlaces, setNearbyPlaces] = useState([]);
+  const [status, setStatus] = useState("Ready.");
+
+  // Location state
+  const [zipcode, setZipcode] = useState(localStorage.getItem("zipcode") || "");
+  const [radius, setRadius] = useState(Number(localStorage.getItem("radius")) || 25);
+  const [userLat, setUserLat] = useState(null);
+  const [userLng, setUserLng] = useState(null);
+  const [locationLabel, setLocationLabel] = useState("");
+  const [locating, setLocating] = useState(false);
+
+  // Autocomplete
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [filteredRestaurants, setFilteredRestaurants] = useState([]);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+
+  // Cart
+  const [cartTotal, setCartTotal] = useState(0);
+
+  // Voice
+  const [isListening, setIsListening] = useState(false);
+
+  // Owner Portal
+  const [showOwnerPortal, setShowOwnerPortal] = useState(false);
+
+  const inputRef = useRef(null);
+  const chatEndRef = useRef(null);
+
+  useEffect(() => { if (token) localStorage.setItem("token", token); }, [token]);
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  // Fetch restaurants when location changes
+  const fetchRestaurants = useCallback(async (lat, lng, r) => {
+    try {
+      const params = {};
+      if (lat != null && lng != null) {
+        params.lat = lat;
+        params.lng = lng;
+        params.radius_miles = r;
+      }
+      const data = await listRestaurants(params);
+      setRestaurants(data);
+
+      // Also fetch real nearby restaurants from OpenStreetMap
+      if (lat != null && lng != null) {
+        try {
+          const nearby = await fetchNearby({ lat, lng, radius_miles: r });
+          setNearbyPlaces(nearby);
+        } catch {
+          setNearbyPlaces([]);
+        }
+      }
+    } catch {
+      setRestaurants([]);
+    }
+  }, []);
+
+  // Auto-detect location on mount
+  useEffect(() => {
+    // Try saved zipcode first
+    const savedZip = localStorage.getItem("zipcode");
+    if (savedZip) {
+      setZipcode(savedZip);
+      lookupZipcodeAuto(savedZip);
+      return;
+    }
+
+    // Otherwise, auto-detect via GPS
+    if (navigator.geolocation) {
+      setLocating(true);
+      setLocationLabel("Detecting location...");
+      navigator.geolocation.getCurrentPosition(
+        async (pos) => {
+          const lat = pos.coords.latitude;
+          const lng = pos.coords.longitude;
+          setUserLat(lat);
+          setUserLng(lng);
+          // Reverse geocode to get city name
+          try {
+            const res = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`);
+            const geo = await res.json();
+            setLocationLabel(`${geo.city || geo.locality || ""}, ${geo.principalSubdivisionCode || geo.countryCode || ""}`);
+          } catch {
+            setLocationLabel(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+          }
+          await fetchRestaurants(lat, lng, radius);
+          setLocating(false);
+        },
+        () => {
+          // User denied or error — show all restaurants
+          setLocationLabel("");
+          fetchRestaurants(null, null, radius);
+          setLocating(false);
+        },
+        { timeout: 5000 }
+      );
+    } else {
+      fetchRestaurants(null, null, radius);
+    }
+  }, []);
+
+  // Helper for auto-loading saved zipcode (no state setter for setLocating race)
+  const lookupZipcodeAuto = async (zip) => {
+    setLocating(true);
+    try {
+      const res = await fetch(`https://api.zippopotam.us/us/${zip}`);
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      const place = data.places[0];
+      const lat = parseFloat(place.latitude);
+      const lng = parseFloat(place.longitude);
+      setUserLat(lat);
+      setUserLng(lng);
+      setLocationLabel(`${place["place name"]}, ${place["state abbreviation"]}`);
+      await fetchRestaurants(lat, lng, radius);
+    } catch {
+      fetchRestaurants(null, null, radius);
+    }
+    setLocating(false);
+  };
+
+  // --- Location functions ---
+  const lookupZipcode = async (zip) => {
+    if (!zip || zip.length < 5) return;
+    setLocating(true);
+    try {
+      const res = await fetch(`https://api.zippopotam.us/us/${zip}`);
+      if (!res.ok) throw new Error("Invalid zipcode");
+      const data = await res.json();
+      const place = data.places[0];
+      const lat = parseFloat(place.latitude);
+      const lng = parseFloat(place.longitude);
+      setUserLat(lat);
+      setUserLng(lng);
+      setLocationLabel(`${place["place name"]}, ${place["state abbreviation"]}`);
+      localStorage.setItem("zipcode", zip);
+      localStorage.setItem("radius", radius);
+      await fetchRestaurants(lat, lng, radius);
+    } catch {
+      setLocationLabel("Invalid zipcode");
+    }
+    setLocating(false);
+  };
+
+  const useMyLocation = () => {
+    if (!navigator.geolocation) {
+      setLocationLabel("Geolocation not supported");
+      return;
+    }
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        setUserLat(lat);
+        setUserLng(lng);
+        setLocationLabel(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+        await fetchRestaurants(lat, lng, radius);
+        setLocating(false);
+      },
+      () => {
+        setLocationLabel("Location denied");
+        setLocating(false);
+      }
+    );
+  };
+
+  const handleRadiusChange = async (newRadius) => {
+    setRadius(newRadius);
+    localStorage.setItem("radius", newRadius);
+    if (userLat != null && userLng != null) {
+      await fetchRestaurants(userLat, userLng, newRadius);
+    }
+  };
+
+  // --- Voice ---
+  const startListening = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { alert("Voice not supported. Use Chrome."); return; }
+    const rec = new SR();
+    rec.lang = "en-US";
+    rec.continuous = false;
+    rec.interimResults = false;
+    rec.onstart = () => setIsListening(true);
+    rec.onresult = (e) => {
+      const text = e.results[0][0].transcript;
+      setMessageText(text);
+      setIsListening(false);
+      setTimeout(() => doSend(text), 200);
+    };
+    rec.onerror = () => setIsListening(false);
+    rec.onend = () => setIsListening(false);
+    rec.start();
+  };
+
+  // --- Send ---
+  const doSend = async (text) => {
+    if (!text.trim()) return;
+    setMessages((p) => [...p, { role: "user", content: text.trim() }]);
+    setMessageText("");
+    setShowSuggestions(false);
+    setStatus("Thinking...");
+    try {
+      const res = await sendMessage(token, { session_id: sessionId, text: text.trim() });
+      setSessionId(res.session_id);
+      setMessages((p) => [...p, {
+        role: "bot", content: res.reply,
+        categories: res.categories || null,
+        items: res.items || null,
+      }]);
+      const m = res.reply.match(/Cart total: \$([0-9.]+)/);
+      if (m) setCartTotal(parseFloat(m[1]));
+      if (res.reply.match(/Added.*Cart total/)) {
+        const m2 = res.reply.match(/\$([0-9.]+)/);
+        if (m2) setCartTotal(parseFloat(m2[1]));
+      }
+      setStatus("Ready.");
+    } catch (err) {
+      setStatus(err.message || "Failed.");
+    }
+  };
+
+  const handleSend = (e) => { e.preventDefault(); doSend(messageText); };
+  const handleCategoryClick = (cat) => doSend(cat.name);
+  const handleAddItem = (item) => doSend(`add:${item.id}:1`);
+
+  // --- # autocomplete ---
+  const handleInputChange = (e) => {
+    const val = e.target.value;
+    setMessageText(val);
+    if (val.startsWith("#")) {
+      const q = val.slice(1).toLowerCase();
+      // Combine partnered + nearby
+      const partnered = restaurants.filter(
+        (r) => r.name.toLowerCase().includes(q) || r.slug.toLowerCase().includes(q)
+      ).map((r) => ({ ...r, partnered: true }));
+
+      const nearby = nearbyPlaces.filter(
+        (r) => r.name.toLowerCase().includes(q)
+      ).map((r) => ({
+        ...r,
+        slug: r.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
+        partnered: false,
+      }));
+
+      const combined = [...partnered, ...nearby];
+      setFilteredRestaurants(combined);
+      setShowSuggestions(combined.length > 0);
+      setSelectedIndex(0);
+    } else {
+      setShowSuggestions(false);
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (!showSuggestions) {
+      if (e.key === "Enter") { e.preventDefault(); handleSend(e); }
+      return;
+    }
+    if (e.key === "ArrowDown") { e.preventDefault(); setSelectedIndex((i) => (i + 1) % filteredRestaurants.length); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setSelectedIndex((i) => (i - 1 + filteredRestaurants.length) % filteredRestaurants.length); }
+    else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); if (filteredRestaurants[selectedIndex]) selectRestaurant(filteredRestaurants[selectedIndex]); }
+    else if (e.key === "Escape") setShowSuggestions(false);
+  };
+
+  const selectRestaurant = (r) => { setShowSuggestions(false); doSend(`#${r.slug}`); };
+
+  // --- Auth ---
+  const handleAuth = async (e) => {
+    e.preventDefault();
+    setStatus("Signing in...");
+    try {
+      const res = mode === "login" ? await login({ email, password }) : await register({ email, password });
+      setToken(res.access_token);
+      setStatus("Ready.");
+    } catch (err) { setStatus(err.message || "Auth failed."); }
+  };
+
+  const handleLogout = () => {
+    setToken(""); setSessionId(null); setMessages([welcomeMsg]);
+    setCartTotal(0); localStorage.removeItem("token");
+  };
+
+  const renderContent = (text) => {
+    return text.split(/(\*\*[^*]+\*\*)/g).map((p, i) =>
+      p.startsWith("**") && p.endsWith("**") ? <strong key={i}>{p.slice(2, -2)}</strong> : p
+    );
+  };
+
+  if (showOwnerPortal) {
+    return (
+      <OwnerPortal
+        token={token}
+        onBack={() => setShowOwnerPortal(false)}
+        onTokenUpdate={(t) => { setToken(t); setShowOwnerPortal(true); }}
+      />
+    );
+  }
+
+  return (
+    <div className="page">
+      {/* Location Bar */}
+      <div className="location-bar">
+        <div className="location-left">
+          <span className="location-icon">📍</span>
+          <input
+            className="zip-input"
+            type="text"
+            placeholder="Enter zipcode"
+            value={zipcode}
+            onChange={(e) => setZipcode(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") lookupZipcode(zipcode); }}
+            maxLength={5}
+          />
+          <button className="location-btn" onClick={() => lookupZipcode(zipcode)} disabled={locating}>
+            {locating ? "..." : "Go"}
+          </button>
+          <button className="location-btn gps-btn" onClick={useMyLocation} disabled={locating} title="Use my location">
+            🎯
+          </button>
+        </div>
+        <div className="location-center">
+          {locationLabel && <span className="location-label">{locationLabel}</span>}
+        </div>
+        <div className="location-right">
+          <button
+            className="location-btn"
+            onClick={() => setShowOwnerPortal(true)}
+            title="Restaurant Owner Portal"
+            style={{ background: "linear-gradient(135deg, #6366f1, #8b5cf6)", fontSize: "0.82rem" }}
+          >
+            🍽️ Owner
+          </button>
+          <label className="radius-label">
+            Within
+            <select value={radius} onChange={(e) => handleRadiusChange(Number(e.target.value))}>
+              {RADIUS_OPTIONS.map((r) => (
+                <option key={r} value={r}>{r} mi</option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <header className="hero">
+        <div>
+          <p className="badge">One chat for every restaurant</p>
+          <h1>RestarentAI</h1>
+          <p className="subtitle">
+            A fast, single-chat ordering platform for nearby restaurants.
+            No endless apps, no extra fees.
+          </p>
+        </div>
+        <div className="hero-card">
+          {/* Partnered restaurants */}
+          {restaurants.length > 0 && (
+            <>
+              <h2>🟢 Order Now</h2>
+              <ul>
+                {restaurants.map((r) => (
+                  <li key={r.id} onClick={() => token && selectRestaurant(r)} style={{ cursor: token ? "pointer" : "default" }}>
+                    <div className="restaurant-info">
+                      <strong>{r.name}</strong>
+                      {r.city && <span className="restaurant-city">{r.city}</span>}
+                    </div>
+                    <div className="restaurant-meta">
+                      {r.distance_miles != null && (
+                        <span className="restaurant-distance">{r.distance_miles} mi</span>
+                      )}
+                      <span className="restaurant-slug">#{r.slug}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
+          {/* Real nearby restaurants */}
+          <h2 style={restaurants.length > 0 ? { marginTop: 20 } : {}}>📍 Nearby Restaurants</h2>
+          {nearbyPlaces.length === 0 ? (
+            <p className="hint">
+              {locating ? "Discovering nearby restaurants..." : userLat ? "No restaurants found nearby." : "Set your location to discover restaurants."}
+            </p>
+          ) : (
+            <ul>
+              {nearbyPlaces.map((p, i) => (
+                <li key={`nearby-${i}`} className="nearby-item">
+                  <div className="restaurant-info">
+                    <strong>{p.name}</strong>
+                    <span className="restaurant-city">
+                      {p.cuisine && <span className="cuisine-tag">{p.cuisine}</span>}
+                      {p.address && ` · ${p.address}`}
+                    </span>
+                  </div>
+                  <div className="restaurant-meta">
+                    <span className="restaurant-distance">{p.distance_miles} mi</span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </header>
+
+      <main className="content">
+        {!token ? (
+          <section className="auth">
+            <h2>{mode === "login" ? "Sign in" : "Create account"}</h2>
+            <form onSubmit={handleAuth}>
+              <label>Email<input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required /></label>
+              <label>Password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required minLength={6} /></label>
+              <button type="submit">{mode === "login" ? "Sign in" : "Register"}</button>
+            </form>
+            <button className="ghost" onClick={() => setMode(mode === "login" ? "register" : "login")}>
+              {mode === "login" ? "Need an account?" : "Already have an account?"}
+            </button>
+            {status !== "Ready." && <p className="status-msg">{status}</p>}
+          </section>
+        ) : (
+          <section className="chat">
+            <div className="chat-header">
+              <div>
+                <h2>Ordering chat</h2>
+                <p className="chat-status">{status}</p>
+              </div>
+              <div className="chat-header-right">
+                {cartTotal > 0 && (
+                  <button className="cart-btn" onClick={() => doSend("cart")}>🛒 ${cartTotal.toFixed(2)}</button>
+                )}
+                <button className="ghost" onClick={handleLogout}>Log out</button>
+              </div>
+            </div>
+
+            <div className="chat-window">
+              {messages.map((msg, idx) => (
+                <div key={idx}>
+                  {/* Hide system commands like add:1:1 */}
+                  {msg.role === "user" && msg.content.startsWith("add:") ? null : (
+                    <div className={`bubble ${msg.role}`}>{renderContent(msg.content)}</div>
+                  )}
+                  {msg.categories && (
+                    <div className="chips-row">
+                      {msg.categories.map((cat) => (
+                        <button key={cat.id} className="chip" onClick={() => handleCategoryClick(cat)}>
+                          <span className="chip-name">{cat.name}</span>
+                          <span className="chip-count">{cat.item_count}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {msg.items && (
+                    <div className="items-grid">
+                      {msg.items.map((item) => (
+                        <div key={item.id} className="item-card">
+                          <div className="item-info">
+                            <span className="item-name">{item.name}</span>
+                            {item.description && <span className="item-desc">{item.description}</span>}
+                            <span className="item-price">${(item.price_cents / 100).toFixed(2)}</span>
+                          </div>
+                          <button className="add-btn" onClick={() => handleAddItem(item)}>+</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+              <div ref={chatEndRef} />
+            </div>
+
+            <div className="chat-input-wrapper">
+              <form className="chat-input" onSubmit={handleSend}>
+                <div className="input-container">
+                  <input ref={inputRef} value={messageText} onChange={handleInputChange}
+                    onKeyDown={handleKeyDown} placeholder='Type # for restaurants, or say what you want...' />
+                  {showSuggestions && (
+                    <div className="suggestions">
+                      {filteredRestaurants.map((r, i) => (
+                        <div key={r.slug + "-" + i}
+                          className={`suggestion-item ${i === selectedIndex ? "selected" : ""}`}
+                          onMouseDown={(e) => { e.preventDefault(); selectRestaurant(r); }}
+                          onMouseEnter={() => setSelectedIndex(i)}
+                        >
+                          <div>
+                            <span className="suggestion-name">{r.name}</span>
+                            {r.distance_miles != null && (
+                              <span className="suggestion-distance"> · {r.distance_miles} mi</span>
+                            )}
+                            {r.cuisine && (
+                              <span className="cuisine-tag" style={{ marginLeft: 6 }}>{r.cuisine}</span>
+                            )}
+                          </div>
+                          <div>
+                            {r.partnered ? (
+                              <span className="partner-badge">🟢 Order Now</span>
+                            ) : (
+                              <span className="suggestion-slug">#{r.slug}</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <button type="button" className={`mic-btn ${isListening ? "listening" : ""}`}
+                  onClick={startListening} title="Voice input">
+                  {isListening ? "🔴" : "🎤"}
+                </button>
+                <button type="submit">Send</button>
+              </form>
+            </div>
+          </section>
+        )}
+      </main>
+    </div>
+  );
+}

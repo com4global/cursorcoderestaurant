@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Text to Avatar Video (No External API)</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 24px;
+      background: #050816;
+      color: #e5e7eb;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .app {
+      width: 100%;
+      max-width: 900px;
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 24px;
+    }
+
+    .panel {
+      background: radial-gradient(circle at top left, #111827, #020617);
+      border-radius: 16px;
+      padding: 16px 18px;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      box-shadow: 0 20px 40px rgba(15, 23, 42, 0.7);
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 18px;
+      color: #e5e7eb;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 220px;
+      resize: vertical;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid #4b5563;
+      background: #020617;
+      color: #e5e7eb;
+      font-size: 14px;
+      line-height: 1.5;
+      box-sizing: border-box;
+      outline: none;
+    }
+
+    textarea:focus {
+      border-color: #6366f1;
+      box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.6);
+    }
+
+    .controls {
+      margin-top: 10px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: none;
+      border-radius: 999px;
+      padding: 8px 18px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: linear-gradient(135deg, #6366f1, #22c55e);
+      color: white;
+      box-shadow: 0 8px 20px rgba(79, 70, 229, 0.7);
+      transition: transform 0.1s ease, box-shadow 0.1s ease, filter 0.1s ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 12px 24px rgba(79, 70, 229, 0.8);
+      filter: brightness(1.08);
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: default;
+      box-shadow: none;
+      transform: none;
+      filter: none;
+    }
+
+    .status {
+      font-size: 13px;
+      color: #9ca3af;
+    }
+
+    .status strong {
+      color: #e5e7eb;
+    }
+
+    canvas {
+      width: 100%;
+      max-width: 420px;
+      background: radial-gradient(circle at top, #111827, #020617);
+      border-radius: 16px;
+      border: 1px solid rgba(148, 163, 184, 0.3);
+      display: block;
+      margin: 0 auto;
+    }
+
+    .download {
+      margin-top: 12px;
+      font-size: 14px;
+    }
+
+    .download a {
+      color: #22c55e;
+      text-decoration: none;
+      font-weight: 500;
+    }
+
+    .download a:hover {
+      text-decoration: underline;
+    }
+
+    .warning {
+      font-size: 12px;
+      color: #f97316;
+      margin-top: 6px;
+    }
+
+    @media (max-width: 800px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+      body {
+        padding: 12px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <h1 style="font-size:22px; margin-bottom:6px;">Script to Talking Avatar Video</h1>
+  <div style="font-size:13px; color:#9ca3af; margin-bottom:18px;">
+    All in your browser. No external APIs.
+  </div>
+
+  <div class="app">
+    <div class="panel">
+      <h2>1. Enter your script</h2>
+      <textarea id="scriptInput" placeholder="Type your English script here...
+For best lip-sync, write full sentences with punctuation."></textarea>
+
+      <div class="controls">
+        <button id="generateBtn">Generate Video</button>
+        <span class="status" id="statusText">Idle.</span>
+      </div>
+      <div class="warning">
+        Works best in modern Chromium browsers (Chrome, Edge). Audio & video stay on your device.
+      </div>
+
+      <div class="download" id="downloadContainer" style="display:none;">
+        <strong>Video ready:</strong>
+        <a id="downloadLink" href="#" download="avatar-script.webm">Download talking avatar video</a>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>2. Avatar preview</h2>
+      <canvas id="avatarCanvas" width="480" height="360"></canvas>
+    </div>
+  </div>
+
+  <script>
+    // --- Basic feature checks ---
+    if (!("speechSynthesis" in window)) {
+      alert("Your browser does not support Speech Synthesis. Please use Chrome or Edge.");
+    }
+    if (!HTMLCanvasElement.prototype.captureStream) {
+      alert("Your browser does not support canvas.captureStream(), which is needed for recording the avatar.");
+    }
+    if (typeof MediaRecorder === "undefined") {
+      alert("Your browser does not support MediaRecorder, so video export will not work.");
+    }
+
+    const scriptInput = document.getElementById("scriptInput");
+    const generateBtn = document.getElementById("generateBtn");
+    const statusText = document.getElementById("statusText");
+    const avatarCanvas = document.getElementById("avatarCanvas");
+    const ctx = avatarCanvas.getContext("2d");
+    const downloadContainer = document.getElementById("downloadContainer");
+    const downloadLink = document.getElementById("downloadLink");
+
+    // --- Lip-sync state ---
+    let isSpeaking = false;
+    let blinkState = 0; // 0=open, 1=half, 2=closed
+    let recorder = null;
+    let recordedChunks = [];
+    let animFrameId = null;
+
+    // Current viseme (mouth shape)
+    let currentViseme = "rest"; // rest, A, E, O, U, M, F, L, S
+    let visemeUntilTime = 0;
+
+    // Word timing + visemes
+    let utteranceText = "";
+    let words = [];
+    let wordBoundaries = []; // { index, startChar, endChar, startTime, endTime }
+
+    // Simple letter-to-viseme mapping (heuristic, no external APIs)
+    const LETTER_VISEME_MAP = {
+      A: "A", E: "E", I: "E", Y: "E",
+      O: "O", U: "U", W: "U",
+      M: "M", B: "M", P: "M",
+      F: "F", V: "F",
+      L: "L", R: "L",
+      S: "S", Z: "S", C: "S", J: "S", T: "S", D: "S", N: "S"
+    };
+
+    function lettersToVisemes(word) {
+      const visemes = [];
+      const upper = word.toUpperCase();
+      for (let ch of upper) {
+        const v = LETTER_VISEME_MAP[ch];
+        if (v) {
+          if (visemes.length === 0 || visemes[visemes.length - 1] !== v) {
+            visemes.push(v);
+          }
+        }
+      }
+      if (visemes.length === 0) visemes.push("rest");
+      return visemes;
+    }
+    // --- Avatar drawing ---
+    function drawAvatar(timestamp) {
+      const w = avatarCanvas.width;
+      const h = avatarCanvas.height;
+
+      // Background
+      ctx.clearRect(0, 0, w, h);
+      const grd = ctx.createRadialGradient(w / 2, h * 0.2, 10, w / 2, h / 2, h / 1.2);
+      grd.addColorStop(0, "#0f172a");
+      grd.addColorStop(1, "#020617");
+      ctx.fillStyle = grd;
+      ctx.fillRect(0, 0, w, h);
+
+      // Body
+      ctx.fillStyle = "#1f2933";
+      ctx.beginPath();
+      ctx.ellipse(w / 2, h * 0.85, w * 0.22, h * 0.14, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Neck
+      ctx.fillStyle = "#facc99";
+      ctx.fillRect(w / 2 - 20, h * 0.58, 40, 40);
+
+      // Head
+      ctx.fillStyle = "#fed7aa";
+      ctx.beginPath();
+      ctx.arc(w / 2, h * 0.42, 90, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Hair (simple)
+      ctx.fillStyle = "#111827";
+      ctx.beginPath();
+      ctx.arc(w / 2, h * 0.34, 92, Math.PI * 1.05, Math.PI * 1.95);
+      ctx.lineTo(w / 2 + 92 * Math.cos(Math.PI * 1.95), h * 0.34 + 92 * Math.sin(Math.PI * 1.95));
+      ctx.closePath();
+      ctx.fill();
+
+      // Eyes
+      const eyeY = h * 0.39;
+      const eyeOffsetX = 34;
+      const eyeOpenHeight = 16;
+      let eyeHeight = eyeOpenHeight;
+
+      if (blinkState === 1) eyeHeight = 7;
+      if (blinkState === 2) eyeHeight = 2;
+
+      ctx.fillStyle = "#111827";
+      ctx.beginPath();
+      ctx.ellipse(w / 2 - eyeOffsetX, eyeY, 10, eyeHeight, 0, 0, Math.PI * 2);
+      ctx.ellipse(w / 2 + eyeOffsetX, eyeY, 10, eyeHeight, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Pupils (only if not fully closed)
+      if (eyeHeight > 3) {
+        ctx.fillStyle = "#020617";
+        ctx.beginPath();
+        ctx.arc(w / 2 - eyeOffsetX, eyeY, 4, 0, Math.PI * 2);
+        ctx.arc(w / 2 + eyeOffsetX, eyeY, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Eyebrows
+      ctx.strokeStyle = "#111827";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(w / 2 - eyeOffsetX - 14, eyeY - 18);
+      ctx.lineTo(w / 2 - eyeOffsetX + 14, eyeY - 22);
+      ctx.moveTo(w / 2 + eyeOffsetX - 14, eyeY - 22);
+      ctx.lineTo(w / 2 + eyeOffsetX + 14, eyeY - 18);
+      ctx.stroke();
+
+      // Nose
+      ctx.strokeStyle = "#fbbf77";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(w / 2, h * 0.41);
+      ctx.lineTo(w / 2 - 6, h * 0.47);
+      ctx.lineTo(w / 2, h * 0.48);
+      ctx.stroke();
+
+      // Mouth (viseme-driven)
+      const mouthY = h * 0.50;
+      const mouthWidth = 60;
+
+      function drawVisemeRest() {
+        ctx.strokeStyle = "#b45309";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(w / 2, mouthY + 10, 26, 0.05 * Math.PI, 0.95 * Math.PI, false);
+        ctx.stroke();
+      }
+
+      function drawVisemeOpen(height, roundness = 0) {
+        const baseHeight = 10;
+        const openAmount = height;
+        const offsetX = mouthWidth * (1 - roundness);
+
+        ctx.fillStyle = "#b91c1c";
+        ctx.beginPath();
+        ctx.moveTo(w / 2 - offsetX, mouthY);
+        ctx.quadraticCurveTo(w / 2, mouthY + openAmount, w / 2 + offsetX, mouthY);
+        ctx.quadraticCurveTo(w / 2, mouthY + baseHeight, w / 2 - offsetX, mouthY);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = "#f9fafb";
+        ctx.beginPath();
+        ctx.moveTo(w / 2 - offsetX + 4, mouthY);
+        ctx.quadraticCurveTo(w / 2, mouthY + baseHeight * 0.3, w / 2 + offsetX - 4, mouthY);
+        ctx.lineTo(w / 2 + offsetX - 4, mouthY - 1);
+        ctx.lineTo(w / 2 - offsetX + 4, mouthY - 1);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      function drawVisemeClosed() {
+        ctx.fillStyle = "#b45309";
+        ctx.beginPath();
+        ctx.roundRect(w / 2 - 26, mouthY - 2, 52, 6, 3);
+        ctx.fill();
+      }
+
+      function drawVisemeTeeth() {
+        ctx.fillStyle = "#111827";
+        ctx.beginPath();
+        ctx.roundRect(w / 2 - 26, mouthY - 4, 52, 8, 4);
+        ctx.fill();
+        ctx.fillStyle = "#f9fafb";
+        ctx.fillRect(w / 2 - 22, mouthY - 4, 44, 5);
+      }
+
+      // Choose viseme
+      switch (currentViseme) {
+        case "A": // wide open "AA"
+          drawVisemeOpen(30, 0.0);
+          break;
+        case "E": // wide but less tall
+          drawVisemeOpen(18, 0.0);
+          break;
+        case "O": // round
+          drawVisemeOpen(26, 0.6);
+          break;
+        case "U": // tighter round
+          drawVisemeOpen(20, 0.75);
+          break;
+        case "M": // closed lips (M/B/P)
+          drawVisemeClosed();
+          break;
+        case "F": // upper teeth on lower lip (F/V)
+          drawVisemeTeeth();
+          break;
+        case "L": // tongue near top teeth
+          drawVisemeOpen(18, 0.1);
+          ctx.fillStyle = "#b91c1c";
+          ctx.beginPath();
+          ctx.ellipse(w / 2, mouthY + 6, 16, 5, 0, 0, Math.PI * 2);
+          ctx.fill();
+          break;
+        case "S": // narrow
+          drawVisemeOpen(10, 0.1);
+          break;
+        default:
+          drawVisemeRest();
+      }
+
+      // Subtle glow ring
+      ctx.strokeStyle = "rgba(96, 165, 250, 0.3)";
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(w / 2, h * 0.42, 110, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Animation state updates
+      if (isSpeaking) {
+        const now = performance.now();
+        if (now > visemeUntilTime) {
+          currentViseme = "rest";
+        }
+
+        // Blink occasionally while speaking
+        const blinkPeriod = 2600; // ms
+        const blinkPhase = (timestamp % blinkPeriod);
+
+        if (blinkPhase < 120) blinkState = 0;         // open
+        else if (blinkPhase < 160) blinkState = 1;    // half
+        else if (blinkPhase < 220) blinkState = 2;    // closed
+        else if (blinkPhase < 260) blinkState = 1;    // opening
+        else blinkState = 0;                          // open
+      } else {
+        // Occasional idle blink
+        const blinkPeriod = 4000;
+        const blinkPhase = (timestamp % blinkPeriod);
+        if (blinkPhase < 140) blinkState = 0;
+        else if (blinkPhase < 180) blinkState = 1;
+        else if (blinkPhase < 240) blinkState = 2;
+        else if (blinkPhase < 280) blinkState = 1;
+        else blinkState = 0;
+      }
+
+      animFrameId = requestAnimationFrame(drawAvatar);
+    }
+
+    function startAvatarAnimation() {
+      if (animFrameId != null) cancelAnimationFrame(animFrameId);
+      animFrameId = requestAnimationFrame(drawAvatar);
+    }
+
+    // --- Speech + recording flow ---
+    function setStatus(text) {
+      statusText.textContent = text;
+    }
+
+    function resetRecording() {
+      if (recorder && recorder.state !== "inactive") {
+        recorder.stop();
+      }
+      recorder = null;
+      recordedChunks = [];
+      downloadContainer.style.display = "none";
+      downloadLink.href = "#";
+    }
+
+    function startRecording() {
+      resetRecording();
+      try {
+        const stream = avatarCanvas.captureStream(30); // 30 FPS
+        const options = { mimeType: "video/webm;codecs=vp9" };
+
+        recorder = new MediaRecorder(stream, options);
+      } catch (e) {
+        console.warn("Falling back to default MediaRecorder options:", e);
+        const stream = avatarCanvas.captureStream(30);
+        recorder = new MediaRecorder(stream);
+      }
+
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          recordedChunks.push(event.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const blob = new Blob(recordedChunks, { type: "video/webm" });
+        const url = URL.createObjectURL(blob);
+        downloadLink.href = url;
+        downloadLink.download = "avatar-script.webm";
+        downloadContainer.style.display = "block";
+        setStatus("Done. Video ready to download.");
+      };
+
+      recorder.start();
+    }
+
+    function stopRecording() {
+      if (recorder && recorder.state !== "inactive") {
+        recorder.stop();
+      }
+    }
+
+    function computeWords(text) {
+      utteranceText = text;
+      const tokens = text.split(/\s+/);
+      words = [];
+      let charIndex = 0;
+      for (let token of tokens) {
+        if (!token) continue;
+        const start = utteranceText.indexOf(token, charIndex);
+        if (start === -1) continue;
+        const end = start + token.length;
+        words.push({ text: token, startChar: start, endChar: end });
+        charIndex = end;
+      }
+      wordBoundaries = words.map((w, i) => ({
+        index: i,
+        startChar: w.startChar,
+        endChar: w.endChar,
+        startTime: null,
+        endTime: null
+      }));
+    }
+
+    function findWordIndexAtChar(charIndex) {
+      for (let i = 0; i < wordBoundaries.length; i++) {
+        const wb = wordBoundaries[i];
+        if (charIndex >= wb.startChar && charIndex < wb.endChar) return i;
+      }
+      return -1;
+    }
+
+    function scheduleWordVisemes(wordIndex) {
+      if (wordIndex < 0 || wordIndex >= words.length) return;
+      const wb = wordBoundaries[wordIndex];
+      if (wb.startTime == null || wb.endTime == null) return;
+
+      const duration = wb.endTime - wb.startTime;
+      if (duration <= 0) return;
+
+      const visemes = lettersToVisemes(words[wordIndex].text);
+      const perViseme = duration / visemes.length;
+
+      visemes.forEach((v, idx) => {
+        const startAt = wb.startTime + idx * perViseme;
+        const endAt = startAt + perViseme * 0.9;
+        const delay = Math.max(0, startAt - performance.now());
+        setTimeout(() => {
+          currentViseme = v;
+          visemeUntilTime = endAt;
+        }, delay);
+      });
+    }
+
+    function speakScript(text) {
+      if (!text.trim()) {
+        alert("Please type your script first.");
+        return;
+      }
+
+      // Prepare text and word metadata
+      computeWords(text);
+
+      // Cancel any existing speech
+      window.speechSynthesis.cancel();
+
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = "en-US";
+      utter.rate = 1.0;
+      utter.pitch = 1.0;
+
+      // Optional: pick a better-sounding English voice if available
+      const voices = window.speechSynthesis.getVoices();
+      const preferredVoice = voices.find(v =>
+        /english/i.test(v.lang || v.name) && /female|en-US/i.test(v.name)
+      ) || voices.find(v => /en-US/i.test(v.lang)) || voices[0];
+
+      if (preferredVoice) {
+        utter.voice = preferredVoice;
+      }
+
+      utter.onstart = () => {
+        isSpeaking = true;
+        currentViseme = "A";
+        visemeUntilTime = performance.now() + 250;
+        setStatus("Speaking and recording video...");
+      };
+
+      // Word boundaries: we use these timings to distribute visemes inside each word
+      utter.onboundary = (event) => {
+        if (event.name === "word" || event.charIndex != null) {
+          const now = performance.now();
+          const charIndex = event.charIndex != null ? event.charIndex : 0;
+          const idx = findWordIndexAtChar(charIndex);
+
+          if (idx !== -1) {
+            if (idx > 0 && wordBoundaries[idx - 1].endTime == null) {
+              wordBoundaries[idx - 1].endTime = now;
+              scheduleWordVisemes(idx - 1);
+            }
+            if (wordBoundaries[idx].startTime == null) {
+              wordBoundaries[idx].startTime = now;
+            }
+          }
+        }
+      };
+
+      utter.onend = () => {
+        isSpeaking = false;
+        currentViseme = "rest";
+        visemeUntilTime = performance.now();
+
+        // Close out last word using utterance end time
+        const now = performance.now();
+        for (let i = 0; i < wordBoundaries.length; i++) {
+          const wb = wordBoundaries[i];
+          if (wb.startTime != null && wb.endTime == null) {
+            wb.endTime = now;
+            scheduleWordVisemes(i);
+          }
+        }
+        stopRecording();
+        generateBtn.disabled = false;
+        setStatus("Speech finished. Finalizing video...");
+      };
+
+      utter.onerror = (e) => {
+        console.error("Speech synthesis error", e);
+        isSpeaking = false;
+        currentViseme = "rest";
+        stopRecording();
+        generateBtn.disabled = false;
+        setStatus("Error during speech. See console.");
+      };
+
+      // Start recording and avatar animation just before speaking
+      startRecording();
+      startAvatarAnimation();
+
+      // Small timeout helps some browsers start canvas stream before recording
+      setTimeout(() => {
+        window.speechSynthesis.speak(utter);
+      }, 150);
+    }
+
+    // --- Wire up UI ---
+    generateBtn.addEventListener("click", () => {
+      const text = scriptInput.value;
+      if (!text.trim()) {
+        alert("Please enter a script to speak.");
+        return;
+      }
+      generateBtn.disabled = true;
+      downloadContainer.style.display = "none";
+      setStatus("Preparing speech and recording...");
+      speakScript(text);
+    });
+
+    // Initialize avatar
+    startAvatarAnimation();
+  </script>
+</body>
+</html>
