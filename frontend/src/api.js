@@ -99,3 +99,46 @@ export async function saveImportedMenu(token, restaurantId, menuData) {
     body: JSON.stringify(menuData),
   });
 }
+
+export async function fetchCart(token) {
+  return request("/cart", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// --- Order Management APIs ---
+
+export async function fetchOrders(token, restaurantId) {
+  return request(`/owner/restaurants/${restaurantId}/orders`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function updateOrderStatus(token, orderId, status) {
+  return request(`/owner/orders/${orderId}/status`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ status }),
+  });
+}
+
+export async function checkout(token) {
+  return request("/checkout", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function updateNotifications(token, restaurantId, payload) {
+  return request(`/owner/restaurants/${restaurantId}/notifications`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchMyOrders(token) {
+  return request("/my-orders", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}

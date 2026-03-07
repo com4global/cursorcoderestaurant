@@ -39,6 +39,8 @@ class RestaurantOut(BaseModel):
     longitude: float | None = None
     distance_miles: float | None = None
     owner_id: int | None = None
+    notification_email: str | None = None
+    notification_phone: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -53,6 +55,8 @@ class RestaurantCreate(BaseModel):
     latitude: float | None = None
     longitude: float | None = None
     phone: str | None = None
+    notification_email: str | None = None
+    notification_phone: str | None = None
 
 
 class RestaurantUpdate(BaseModel):
@@ -65,6 +69,8 @@ class RestaurantUpdate(BaseModel):
     longitude: float | None = None
     phone: str | None = None
     is_active: bool | None = None
+    notification_email: str | None = None
+    notification_phone: str | None = None
 
 
 class CategoryCreate(BaseModel):
@@ -132,3 +138,42 @@ class ChatMessageOut(BaseModel):
     order_id: int | None = None
     categories: list[dict] | None = None
     items: list[dict] | None = None
+    cart_summary: dict | None = None
+
+
+# --- Cart schemas ---
+
+class CartItemOut(BaseModel):
+    name: str
+    quantity: int
+    price_cents: int
+    line_total_cents: int
+
+class CartRestaurantGroup(BaseModel):
+    restaurant_id: int
+    restaurant_name: str
+    order_id: int
+    items: list[CartItemOut]
+    subtotal_cents: int
+
+class CartOut(BaseModel):
+    restaurants: list[CartRestaurantGroup]
+    grand_total_cents: int
+
+
+# --- Order schemas ---
+
+class OrderItemOut(BaseModel):
+    name: str
+    quantity: int
+    price_cents: int
+
+class OrderOut(BaseModel):
+    id: int
+    status: str
+    total_cents: int
+    created_at: str
+    customer_email: str | None = None
+    items: list[OrderItemOut]
+    restaurant_name: str | None = None
+    restaurant_id: int | None = None

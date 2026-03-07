@@ -127,3 +127,25 @@ def recompute_order_total(db: Session, order: Order) -> None:
     )
     order.total_cents = int(total or 0)
     db.commit()
+
+
+def get_user_pending_orders(db: Session, user_id: int) -> list[Order]:
+    """Return all pending orders for a user (across all restaurants)."""
+    return (
+        db.query(Order)
+        .filter(Order.user_id == user_id, Order.status == "pending")
+        .all()
+    )
+
+
+def get_user_order_for_restaurant(db: Session, user_id: int, restaurant_id: int) -> Order | None:
+    """Find existing pending order for a specific restaurant."""
+    return (
+        db.query(Order)
+        .filter(
+            Order.user_id == user_id,
+            Order.restaurant_id == restaurant_id,
+            Order.status == "pending",
+        )
+        .first()
+    )

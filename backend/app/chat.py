@@ -15,7 +15,7 @@ from difflib import SequenceMatcher
 from sqlalchemy.orm import Session
 
 from . import crud
-from .models import ChatSession, MenuItem
+from .models import ChatSession, MenuItem, Order
 
 
 # ---------------------------------------------------------------------------
@@ -23,7 +23,7 @@ from .models import ChatSession, MenuItem
 # ---------------------------------------------------------------------------
 
 def _result(reply, restaurant_id=None, category_id=None, order_id=None,
-            categories=None, items=None):
+            categories=None, items=None, cart_summary=None):
     return {
         "reply": reply,
         "restaurant_id": restaurant_id,
@@ -31,7 +31,38 @@ def _result(reply, restaurant_id=None, category_id=None, order_id=None,
         "order_id": order_id,
         "categories": categories,
         "items": items,
+        "cart_summary": cart_summary,
     }
+
+
+def _build_cart_summary_chat(db: Session, user_id: int) -> dict:
+    """Build grouped cart summary for chat responses."""
+    pending_orders = crud.get_user_pending_orders(db, user_id)
+    groups = []
+    grand_total = 0
+    for order in pending_orders:
+        from .models import Restaurant as RestModel
+        restaurant = db.query(RestModel).filter(RestModel.id == order.restaurant_id).first()
+        items = []
+        for oi in order.items:
+            mi = db.query(MenuItem).filter(MenuItem.id == oi.menu_item_id).first()
+            line_total = oi.price_cents * oi.quantity
+            items.append({
+                "name": mi.name if mi else f"Item #{oi.menu_item_id}",
+                "quantity": oi.quantity,
+                "price_cents": oi.price_cents,
+                "line_total_cents": line_total,
+            })
+        if items:
+            groups.append({
+                "restaurant_id": order.restaurant_id,
+                "restaurant_name": restaurant.name if restaurant else "Unknown",
+                "order_id": order.id,
+                "items": items,
+                "subtotal_cents": order.total_cents,
+            })
+            grand_total += order.total_cents
+    return {"restaurants": groups, "grand_total_cents": grand_total}
 
 
 def _set_session_state(db: Session, session: ChatSession, **updates) -> None:
@@ -201,11 +232,15 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
         if not restaurant:
             return _result("Restaurant not found. Type # to see suggestions.")
 
-        _set_session_state(db, session, restaurant_id=restaurant.id, category_id=None, order_id=None)
+        # Look up existing pending order for this restaurant
+        existing_order = crud.get_user_order_for_restaurant(db, session.user_id, restaurant.id)
+        new_order_id = existing_order.id if existing_order else None
+        _set_session_state(db, session, restaurant_id=restaurant.id, category_id=None, order_id=new_order_id)
         cats = _categories_data(db, restaurant.id)
 
         reply = f"Welcome to {restaurant.name}! Pick a category or just tell me what you want."
-        return _result(reply, restaurant_id=restaurant.id, categories=cats)
+        cart = _build_cart_summary_chat(db, session.user_id)
+        return _result(reply, restaurant_id=restaurant.id, categories=cats, cart_summary=cart)
 
     # --- If no restaurant selected yet ---
     if session.restaurant_id is None:
@@ -286,25 +321,37 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             order_id=order.id,
         )
 
-    # --- View cart ---
+    # --- View cart (multi-restaurant) ---
     if lower in ("cart", "my cart", "show cart", "view cart", "what's in my cart"):
-        if session.order_id is None:
+        pending_orders = crud.get_user_pending_orders(db, session.user_id)
+        if not pending_orders:
             return _result("Your cart is empty! Just tell me what you want.",
                           restaurant_id=session.restaurant_id)
-        order = crud.get_order(db, session.order_id)
-        if not order or not order.items:
+        lines = ["🛒 **Your Cart:**\n"]
+        grand_total = 0
+        from .models import Restaurant as RestModel
+        for order in pending_orders:
+            if not order.items:
+                continue
+            rest = db.query(RestModel).filter(RestModel.id == order.restaurant_id).first()
+            rest_name = rest.name if rest else "Unknown"
+            lines.append(f"**{rest_name}:**")
+            for oi in order.items:
+                mi = db.query(MenuItem).filter(MenuItem.id == oi.menu_item_id).first()
+                name = mi.name if mi else f"Item #{oi.menu_item_id}"
+                lines.append(f"  {oi.quantity}x {name} - ${oi.price_cents * oi.quantity / 100:.2f}")
+            lines.append(f"  Subtotal: ${order.total_cents / 100:.2f}\n")
+            grand_total += order.total_cents
+        if grand_total == 0:
             return _result("Your cart is empty!",
                           restaurant_id=session.restaurant_id)
-        lines = ["Your Cart:\n"]
-        for oi in order.items:
-            mi = db.query(MenuItem).filter(MenuItem.id == oi.menu_item_id).first()
-            name = mi.name if mi else f"Item #{oi.menu_item_id}"
-            lines.append(f"  {oi.quantity}x {name} - ${oi.price_cents * oi.quantity / 100:.2f}")
-        lines.append(f"\nTotal: ${order.total_cents / 100:.2f}")
+        lines.append(f"**Grand Total: ${grand_total / 100:.2f}**")
         lines.append('\nSay "submit" to place your order!')
+        cart = _build_cart_summary_chat(db, session.user_id)
         return _result("\n".join(lines),
                       restaurant_id=session.restaurant_id,
-                      order_id=order.id)
+                      order_id=session.order_id,
+                      cart_summary=cart)
 
     # --- Quick add by item ID (from tapping + button) ---
     quick_add = re.match(r'^add:(\d+)(?::(\d+))?$', lower)
@@ -314,23 +361,21 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
         all_items = _get_all_restaurant_items(db, session.restaurant_id)
         menu_item = next((i for i in all_items if i.id == item_id), None)
         if menu_item:
-            if session.order_id is None:
+            order = crud.get_user_order_for_restaurant(db, session.user_id, session.restaurant_id)
+            if not order:
                 order = crud.create_order(db, session.user_id, session.restaurant_id)
-                crud.attach_order_to_session(db, session, order)
-            else:
-                order = crud.get_order(db, session.order_id)
-                if not order:
-                    order = crud.create_order(db, session.user_id, session.restaurant_id)
-                    crud.attach_order_to_session(db, session, order)
+            crud.attach_order_to_session(db, session, order)
 
             order_item = crud.add_order_item(db, order, menu_item, quantity)
             crud.recompute_order_total(db, order)
             total = f"${order.total_cents / 100:.2f}"
             qty_msg = f" Now {order_item.quantity}x in cart." if order_item.quantity > 1 else ""
+            cart = _build_cart_summary_chat(db, session.user_id)
             return _result(
                 f"Added {quantity}x {menu_item.name}!{qty_msg} Cart total: {total}",
                 restaurant_id=session.restaurant_id,
                 order_id=order.id,
+                cart_summary=cart,
             )
         return _result("Item not found.", restaurant_id=session.restaurant_id)
 
@@ -372,15 +417,11 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             categories=cats,
         )
 
-    # Create or get order
-    if session.order_id is None:
+    # Create or get order (per-restaurant)
+    order = crud.get_user_order_for_restaurant(db, session.user_id, session.restaurant_id)
+    if not order:
         order = crud.create_order(db, session.user_id, session.restaurant_id)
-        crud.attach_order_to_session(db, session, order)
-    else:
-        order = crud.get_order(db, session.order_id)
-        if not order:
-            order = crud.create_order(db, session.user_id, session.restaurant_id)
-            crud.attach_order_to_session(db, session, order)
+    crud.attach_order_to_session(db, session, order)
 
     added_lines = []
     for menu_item, qty in parsed:
@@ -393,6 +434,8 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
     reply = "Added to your order:\n" + "\n".join(added_lines)
     reply += f"\n\nCart total: {total}"
 
+    cart = _build_cart_summary_chat(db, session.user_id)
     return _result(reply,
                   restaurant_id=session.restaurant_id,
-                  order_id=order.id)
+                  order_id=order.id,
+                  cart_summary=cart)

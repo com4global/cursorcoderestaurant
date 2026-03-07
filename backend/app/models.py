@@ -34,6 +34,8 @@ class Restaurant(Base):
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     phone = Column(String(20), nullable=True)
+    notification_email = Column(String(255), nullable=True)
+    notification_phone = Column(String(20), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 

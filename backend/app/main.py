@@ -33,6 +33,45 @@ async def health():
     return {"status": "ok"}
 
 
+# --- Multi-restaurant cart helper ---
+def _build_cart_summary(db: Session, user_id: int) -> dict:
+    """Build grouped cart data across all pending orders for a user."""
+    pending_orders = crud.get_user_pending_orders(db, user_id)
+    groups = []
+    grand_total = 0
+    for order in pending_orders:
+        restaurant = db.query(models.Restaurant).filter(models.Restaurant.id == order.restaurant_id).first()
+        items = []
+        for oi in order.items:
+            mi = db.query(models.MenuItem).filter(models.MenuItem.id == oi.menu_item_id).first()
+            line_total = oi.price_cents * oi.quantity
+            items.append({
+                "name": mi.name if mi else f"Item #{oi.menu_item_id}",
+                "quantity": oi.quantity,
+                "price_cents": oi.price_cents,
+                "line_total_cents": line_total,
+            })
+        if items:
+            groups.append({
+                "restaurant_id": order.restaurant_id,
+                "restaurant_name": restaurant.name if restaurant else "Unknown",
+                "order_id": order.id,
+                "items": items,
+                "subtotal_cents": order.total_cents,
+            })
+            grand_total += order.total_cents
+    return {"restaurants": groups, "grand_total_cents": grand_total}
+
+
+@app.get("/cart")
+def get_cart(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Get all pending orders grouped by restaurant for the current user."""
+    return _build_cart_summary(db, current_user.id)
+
+
 @app.post("/auth/register", response_model=schemas.Token)
 def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
     if crud.get_user_by_email(db, payload.email):
@@ -120,14 +159,16 @@ def restaurants(
     if lat is not None and lng is not None:
         results = []
         for r in all_restaurants:
-            if r.latitude is not None and r.longitude is not None:
+            has_coords = (r.latitude is not None and r.longitude is not None
+                         and not (r.latitude == 0.0 and r.longitude == 0.0))
+            if has_coords:
                 dist = _haversine(lat, lng, r.latitude, r.longitude)
                 if dist <= radius_miles:
                     out = schemas.RestaurantOut.model_validate(r)
                     out.distance_miles = round(dist, 1)
                     results.append(out)
             else:
-                # Restaurants without coords always show (for now)
+                # Restaurants without valid coords always show
                 out = schemas.RestaurantOut.model_validate(r)
                 out.distance_miles = None
                 results.append(out)
@@ -185,6 +226,7 @@ def send_message(
         order_id=result.get("order_id"),
         categories=result.get("categories"),
         items=result.get("items"),
+        cart_summary=result.get("cart_summary"),
     )
 
 
@@ -201,11 +243,20 @@ def _slugify(name: str) -> str:
 # --- Owner registration ---
 @app.post("/auth/register-owner", response_model=schemas.Token)
 def register_owner(payload: schemas.UserCreate, db: Session = Depends(get_db)):
-    """Register as a restaurant owner."""
+    """Register as a restaurant owner, or log in if already registered."""
+    from passlib.hash import bcrypt
     existing = db.query(models.User).filter(models.User.email == payload.email).first()
     if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    from passlib.hash import bcrypt
+        # Verify password — treat as login
+        if not bcrypt.verify(payload.password, existing.password_hash):
+            raise HTTPException(status_code=401, detail="Invalid password")
+        # Upgrade role to owner if still a customer
+        if existing.role == "customer":
+            existing.role = "owner"
+            db.commit()
+        token = create_access_token(existing.email)
+        return {"access_token": token}
+    # New user — register as owner
     user = models.User(
         email=payload.email,
         password_hash=bcrypt.hash(payload.password),
@@ -237,6 +288,22 @@ def create_restaurant(payload: schemas.RestaurantCreate, db: Session = Depends(g
     while db.query(models.Restaurant).filter(models.Restaurant.slug == slug).first():
         slug = f"{base_slug}-{counter}"
         counter += 1
+    # Auto-geocode if lat/lng not provided but address exists
+    r_lat = payload.latitude
+    r_lng = payload.longitude
+    if (r_lat is None or r_lat == 0) and payload.address:
+        try:
+            geo_query = f"{payload.address}, {payload.city or ''} {payload.zipcode or ''}".strip()
+            geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(geo_query)}&format=json&limit=1"
+            geo_req = urllib.request.Request(geo_url, headers={"User-Agent": "RestaurantAI/1.0"})
+            geo_res = urllib.request.urlopen(geo_req, timeout=10)
+            geo_data = _json.loads(geo_res.read())
+            if geo_data:
+                r_lat = float(geo_data[0]["lat"])
+                r_lng = float(geo_data[0]["lon"])
+        except Exception:
+            pass  # Keep original values if geocoding fails
+
     r = models.Restaurant(
         owner_id=current_user.id,
         name=payload.name,
@@ -245,8 +312,8 @@ def create_restaurant(payload: schemas.RestaurantCreate, db: Session = Depends(g
         city=payload.city,
         address=payload.address,
         zipcode=payload.zipcode,
-        latitude=payload.latitude,
-        longitude=payload.longitude,
+        latitude=r_lat,
+        longitude=r_lng,
         phone=payload.phone,
     )
     db.add(r)
@@ -339,22 +406,187 @@ def delete_item(item_id: int, db: Session = Depends(get_db), current_user=Depend
 
 # --- Owner: View orders ---
 @app.get("/owner/restaurants/{restaurant_id}/orders")
-def owner_orders(restaurant_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+def owner_orders(restaurant_id: int, status: str | None = None, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     r = db.query(models.Restaurant).filter(models.Restaurant.id == restaurant_id, models.Restaurant.owner_id == current_user.id).first()
     if not r:
         raise HTTPException(status_code=404, detail="Restaurant not found")
-    orders = db.query(models.Order).filter(models.Order.restaurant_id == restaurant_id).order_by(models.Order.created_at.desc()).limit(50).all()
+    q = db.query(models.Order).filter(models.Order.restaurant_id == restaurant_id)
+    if status:
+        q = q.filter(models.Order.status == status)
+    orders = q.order_by(models.Order.created_at.desc()).limit(50).all()
     results = []
     for o in orders:
         items = []
         for oi in o.items:
             mi = db.query(models.MenuItem).get(oi.menu_item_id)
-            items.append({"name": mi.name if mi else "?", "qty": oi.quantity, "price_cents": oi.price_cents})
+            items.append({"name": mi.name if mi else "?", "quantity": oi.quantity, "price_cents": oi.price_cents})
+        user = db.query(models.User).get(o.user_id)
         results.append({
             "id": o.id,
             "status": o.status,
             "total_cents": o.total_cents,
             "created_at": o.created_at.isoformat(),
+            "customer_email": user.email if user else None,
+            "items": items,
+        })
+    return results
+
+
+# --- Owner: Update order status ---
+@app.patch("/owner/orders/{order_id}/status")
+def update_order_status(order_id: int, payload: dict, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    # Verify ownership
+    rest = db.query(models.Restaurant).filter(
+        models.Restaurant.id == order.restaurant_id,
+        models.Restaurant.owner_id == current_user.id
+    ).first()
+    if not rest:
+        raise HTTPException(status_code=403, detail="Not your restaurant")
+    new_status = payload.get("status", "")
+    valid = ["accepted", "rejected", "preparing", "ready", "completed"]
+    if new_status not in valid:
+        raise HTTPException(status_code=400, detail=f"Status must be one of: {valid}")
+    order.status = new_status
+    db.commit()
+    return {"ok": True, "order_id": order_id, "status": new_status}
+
+
+# --- Owner: Update notification settings ---
+@app.patch("/owner/restaurants/{restaurant_id}/notifications")
+def update_notifications(restaurant_id: int, payload: dict, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    r = db.query(models.Restaurant).filter(models.Restaurant.id == restaurant_id, models.Restaurant.owner_id == current_user.id).first()
+    if not r:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+    if "notification_email" in payload:
+        r.notification_email = payload["notification_email"]
+    if "notification_phone" in payload:
+        r.notification_phone = payload["notification_phone"]
+    db.commit()
+    return {"ok": True}
+
+
+# --- Email notification helper ---
+def _send_order_notification(restaurant, order, items, customer_email, db):
+    """Send email notification to restaurant owner about new order."""
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    load_dotenv()
+    smtp_host = os.getenv("SMTP_HOST", "")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER", "")
+    smtp_pass = os.getenv("SMTP_PASS", "")
+
+    to_email = restaurant.notification_email
+    if not to_email:
+        # Fall back to owner's login email
+        owner = db.query(models.User).get(restaurant.owner_id)
+        to_email = owner.email if owner else None
+
+    if not to_email or not smtp_user:
+        return  # No email configured
+
+    # Build email
+    items_text = "\n".join([f"  • {i['name']} x{i['quantity']} — ${i['price_cents']/100:.2f}" for i in items])
+    total = f"${order.total_cents/100:.2f}"
+
+    subject = f"🔔 New Order #{order.id} — {restaurant.name}"
+    body = f"""New order received!
+
+📋 Order #{order.id}
+🏪 Restaurant: {restaurant.name}
+👤 Customer: {customer_email}
+💰 Total: {total}
+
+Items:
+{items_text}
+
+---
+Log in to your Owner Dashboard to accept or reject this order.
+"""
+
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = smtp_user
+        msg["To"] = to_email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain"))
+
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_pass)
+            server.sendmail(smtp_user, to_email, msg.as_string())
+    except Exception as e:
+        print(f"[Notification] Email failed: {e}")
+
+
+# --- Customer: Checkout ---
+@app.post("/checkout")
+def checkout(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """Confirm all pending orders in cart. Triggers notifications to restaurants."""
+    pending_orders = db.query(models.Order).filter(
+        models.Order.user_id == current_user.id,
+        models.Order.status == "pending"
+    ).all()
+
+    if not pending_orders:
+        raise HTTPException(status_code=400, detail="No items in cart")
+
+    confirmed = []
+    for order in pending_orders:
+        order.status = "confirmed"
+        db.commit()
+
+        # Build items list for notification
+        rest = db.query(models.Restaurant).get(order.restaurant_id)
+        items = []
+        for oi in order.items:
+            mi = db.query(models.MenuItem).get(oi.menu_item_id)
+            items.append({"name": mi.name if mi else "?", "quantity": oi.quantity, "price_cents": oi.price_cents})
+
+        confirmed.append({
+            "order_id": order.id,
+            "restaurant": rest.name if rest else "?",
+            "total_cents": order.total_cents,
+            "items": items,
+        })
+
+        # Send notification
+        if rest:
+            try:
+                _send_order_notification(rest, order, items, current_user.email, db)
+            except Exception as e:
+                print(f"[Notification] Failed for order {order.id}: {e}")
+
+    return {"ok": True, "orders": confirmed, "count": len(confirmed)}
+
+
+# --- Customer: My Orders (track status) ---
+@app.get("/my-orders")
+def my_orders(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """Get all non-pending orders for the current customer, newest first."""
+    orders = db.query(models.Order).filter(
+        models.Order.user_id == current_user.id,
+        models.Order.status != "pending"
+    ).order_by(models.Order.created_at.desc()).limit(20).all()
+    results = []
+    for o in orders:
+        rest = db.query(models.Restaurant).get(o.restaurant_id)
+        items = []
+        for oi in o.items:
+            mi = db.query(models.MenuItem).get(oi.menu_item_id)
+            items.append({"name": mi.name if mi else "?", "quantity": oi.quantity, "price_cents": oi.price_cents})
+        results.append({
+            "id": o.id,
+            "status": o.status,
+            "total_cents": o.total_cents,
+            "created_at": o.created_at.isoformat(),
+            "restaurant_name": rest.name if rest else "?",
+            "restaurant_id": o.restaurant_id,
             "items": items,
         })
     return results
@@ -376,7 +608,7 @@ def import_menu_from_url(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """Scrape a restaurant website and extract menu using Gemini AI."""
+    """Scrape a restaurant website and extract menu using AI. Uses JS rendering for full extraction."""
     if current_user.role not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Not a restaurant owner")
 
@@ -384,31 +616,215 @@ def import_menu_from_url(
     if not url:
         raise HTTPException(status_code=400, detail="URL is required")
 
-    # 1. Scrape the website
+    from urllib.parse import urljoin, urlparse
+    import re
+
+    def _fetch_rendered(target_url: str) -> str:
+        """Fetch a URL with full JS rendering + scrolling + category clicking."""
+        # --- Try Playwright first (clicks categories + scrolls for lazy content) ---
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page(viewport={"width": 1280, "height": 900})
+                page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(3000)
+
+                # Step 1: Scroll through to trigger initial lazy loading
+                prev_height = 0
+                for _ in range(30):
+                    page.evaluate("window.scrollBy(0, 600)")
+                    page.wait_for_timeout(500)
+                    curr = page.evaluate("document.body.scrollHeight")
+                    if curr == prev_height:
+                        break
+                    prev_height = curr
+
+                # Step 2: Find and click all category/section nav links
+                # Square/Weebly sites have nav links that load categories on click
+                try:
+                    cat_links = page.evaluate("""() => {
+                        const links = [];
+                        // Find all anchor links within the page that point to sections
+                        document.querySelectorAll('a[href*="#"]').forEach(a => {
+                            const href = a.getAttribute('href');
+                            const text = a.innerText.trim();
+                            if (text && text.length > 2 && text.length < 60 && href) {
+                                links.push({href: href, text: text});
+                            }
+                        });
+                        return links;
+                    }""")
+
+                    # Click each category link to force-load its items
+                    clicked = set()
+                    for link_info in cat_links:
+                        link_text = link_info.get("text", "").upper()
+                        # Skip non-menu navigation links
+                        if link_text in clicked or link_text in {"HOME", "MENU", "MORE", 
+                            "CONTACT US", "GIFT CARDS", "SIGN IN", "ORDER NOW", "CHECKOUT"}:
+                            continue
+                        if "CATERING" in link_text or "PRIVACY" in link_text:
+                            continue
+                        clicked.add(link_text)
+                        try:
+                            href = link_info["href"]
+                            # Click the link via JS to trigger lazy-load
+                            page.evaluate(f"""() => {{
+                                const el = document.querySelector('a[href="{href}"]');
+                                if (el) el.click();
+                            }}""")
+                            page.wait_for_timeout(1500)  # Wait for content to load
+                            # Scroll down a bit to trigger rendering
+                            page.evaluate("window.scrollBy(0, 400)")
+                            page.wait_for_timeout(500)
+                        except Exception:
+                            continue
+
+                except Exception:
+                    pass
+
+                # Step 3: Final full scroll to capture everything
+                page.evaluate("window.scrollTo(0, 0)")
+                page.wait_for_timeout(500)
+                for _ in range(50):
+                    page.evaluate("window.scrollBy(0, 600)")
+                    page.wait_for_timeout(300)
+                    curr = page.evaluate("document.body.scrollHeight")
+                    scroll_pos = page.evaluate("window.scrollY + window.innerHeight")
+                    if scroll_pos >= curr:
+                        break
+
+                # Extract all text content
+                text = page.evaluate("""() => {
+                    document.querySelectorAll('script, style, noscript, svg').forEach(el => el.remove());
+                    return document.body.innerText;
+                }""")
+                browser.close()
+                if text and len(text) > 500:
+                    return text
+        except Exception:
+            pass  # Playwright not available or failed
+
+        # --- Fallback: Jina Reader (no scrolling, misses lazy content) ---
+        jina_url = f"https://r.jina.ai/{target_url}"
+        req = urllib.request.Request(jina_url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "text/plain",
+        })
+        try:
+            response = urllib.request.urlopen(req, timeout=30)
+            return response.read().decode("utf-8", errors="ignore")
+        except Exception:
+            # Fallback to direct HTML fetch
+            req2 = urllib.request.Request(target_url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml",
+            })
+            response2 = urllib.request.urlopen(req2, timeout=20)
+            html = response2.read().decode("utf-8", errors="ignore")
+            soup = BeautifulSoup(html, "html.parser")
+            for tag in soup(["script", "style", "nav", "footer", "noscript"]):
+                tag.decompose()
+            return soup.get_text(separator="\n", strip=True)
+
+    def _discover_links_from_text(text: str, base_url: str) -> list:
+        """Find menu-related links from rendered markdown text."""
+        base_domain = urlparse(base_url).netloc
+        menu_keywords = ["menu", "pizza", "burger", "chicken", "pasta",
+                        "sandwich", "salad", "appetizer", "dessert", "drink",
+                        "beverage", "sides", "entree", "wings", "seafood",
+                        "bread", "tots", "specialty", "build-your-own",
+                        "steak", "taco", "sushi", "noodle", "curry", "biryani"]
+        # Find markdown links: [text](url)
+        links = re.findall(r'\[([^\]]*)\]\((https?://[^\)]+)\)', text)
+        found = set()
+        for link_text, link_url in links:
+            parsed = urlparse(link_url)
+            if parsed.netloc != base_domain:
+                continue
+            path = parsed.path.lower().rstrip("/")
+            if not path or path == urlparse(base_url).path.lower().rstrip("/"):
+                continue
+            combined = path + " " + link_text.lower()
+            if any(kw in combined for kw in menu_keywords):
+                clean = parsed.scheme + "://" + parsed.netloc + parsed.path
+                found.add(clean)
+        return list(found)[:10]
+
+    # --- Phase 1: Fetch main page with JS rendering ---
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        response = urllib.request.urlopen(req, timeout=15)
-        html = response.read().decode("utf-8", errors="ignore")
+        main_text = _fetch_rendered(url)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not fetch URL: {str(e)}")
 
-    # 2. Extract clean text using BeautifulSoup
-    soup = BeautifulSoup(html, "html.parser")
-    # Remove scripts, styles, nav, footer
-    for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "iframe"]):
-        tag.decompose()
-    text = soup.get_text(separator="\n", strip=True)
-    # Limit to 8000 chars for the LLM
-    text = text[:8000]
+    # --- Phase 2: Discover menu sub-pages ---
+    menu_links = _discover_links_from_text(main_text, url)
+    all_pages = {url: main_text}
 
-    # 3. Send to OpenAI for extraction
-    load_dotenv()
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+    # Also try /menu if not already found
+    base = url.rstrip("/")
+    if "/menu" not in base.lower():
+        menu_url = base + "/menu"
+        if menu_url not in all_pages and menu_url not in menu_links:
+            menu_links.insert(0, menu_url)
 
-    try:
-        prompt = f"""Extract the restaurant menu from this website text.
+    # --- Phase 3: Crawl discovered category pages ---
+    for link in menu_links[:8]:
+        if link in all_pages:
+            continue
+        try:
+            page_text = _fetch_rendered(link)
+            if len(page_text) > 200:
+                all_pages[link] = page_text
+        except Exception:
+            continue
+
+    # --- Phase 4: Combine all page content (clean navigation cruft) ---
+    combined_parts = []
+    for page_url, page_text in all_pages.items():
+        # Strip markdown links [text](url) — they waste tokens with repeated nav bars
+        clean = re.sub(r'\[([^\]]*)\]\(https?://[^\)]+\)', r'\1', page_text)
+        # Strip image references
+        clean = re.sub(r'!\[([^\]]*)\]\([^\)]+\)', '', clean)
+        # Remove duplicate lines (nav links repeated 3-4 times)
+        seen_lines = set()
+        deduped = []
+        for line in clean.split('\n'):
+            stripped = line.strip()
+            if stripped and stripped not in seen_lines:
+                seen_lines.add(stripped)
+                deduped.append(stripped)
+            elif not stripped and deduped and deduped[-1] != '':
+                deduped.append('')
+        clean = '\n'.join(deduped)
+        # Remove common non-menu noise
+        for noise in ['Shopping Cart', 'Continue Shopping', 'Accepted here',
+                       'Secure checkout by Square', 'Back to Cart', 'Sign Up',
+                       'reCAPTCHA', 'Privacy Policy', 'Terms of Service',
+                       'ALL SALES ARE FINAL', 'Stay in the Loop',
+                       'Helpful Information', 'Returns Policy']:
+            clean = clean.replace(noise, '')
+        # Keep up to 15000 chars per page
+        clean = clean[:15000]
+        if len(clean) > 100:
+            label = page_url.split("//", 1)[-1]
+            combined_parts.append(f"=== PAGE: {label} ===\n{clean}")
+
+    content = "\n\n".join(combined_parts)
+    pages_scraped = len(all_pages)
+
+    if len(content) < 100:
+        return {"error": "Could not extract content from this website. Try a direct menu page URL or a food delivery page (DoorDash, UberEats, Grubhub)."}
+
+    # Limit total content for the LLM
+    content = content[:40000]
+
+    menu_prompt = f"""Extract the restaurant menu from the following website data.
+
+The data comes from {pages_scraped} page(s) of the same restaurant website.
+Each page may contain a different menu category with its items.
+Look through ALL pages to find EVERY menu item.
 
 Return JSON with this exact format:
 {{
@@ -429,43 +845,285 @@ Return JSON with this exact format:
 
 Rules:
 - price_cents is the price in cents (e.g. $12.99 = 1299). If no price found, use 0.
-- Group items into logical categories (Appetizers, Mains, Drinks, Desserts, etc.)
-- Keep descriptions short (under 50 chars)
-- If you can't find a menu, return {{"error": "No menu found"}}
+- Group items into logical categories (Appetizers, Entrees, Sides, Drinks, Desserts, etc.)
+- Keep descriptions short (under 60 chars)
+- Extract EVERY single food item you can find from ALL pages
+- Look for patterns like "Item Name ... $Price" or "Item Name\\nDescription\\n$Price"
+- DO NOT return empty categories. If a category has 0 items, do not include it.
+- MERGE items from different pages into unified categories
+- Remove navigation text, legal disclaimers, and non-menu content
+- If you truly cannot find ANY menu items, return {{"error": "No menu found"}}
 
-Website text:
-{text}"""
+Website data:
+{content}"""
 
-        # OpenAI REST API with json_mode
-        oai_url = "https://api.openai.com/v1/chat/completions"
-        oai_body = _json.dumps({
-            "model": "gpt-4o-mini",
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": "You extract restaurant menus from website text and return structured JSON."},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.1,
-        }).encode()
+    # --- Phase 5: Extract with AI (try OpenAI first, then Gemini) ---
+    load_dotenv()
+    menu_data = None
+    response_text = ""
 
-        oai_req = urllib.request.Request(oai_url, oai_body, {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        })
-        oai_res = urllib.request.urlopen(oai_req, timeout=60)
-        oai_data = _json.loads(oai_res.read())
-        response_text = oai_data["choices"][0]["message"]["content"].strip()
+    # Try OpenAI
+    oai_key = os.getenv("OPENAI_API_KEY", "")
+    if oai_key:
+        try:
+            oai_url = "https://api.openai.com/v1/chat/completions"
+            oai_body = _json.dumps({
+                "model": "gpt-4o-mini",
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": "You extract restaurant menus from website data. Extract EVERY menu item with name, description, and price. Never return empty categories. Return structured JSON."},
+                    {"role": "user", "content": menu_prompt},
+                ],
+                "temperature": 0.1,
+                "max_tokens": 16000,
+            }).encode()
 
-        menu_data = _json.loads(response_text)
-        return menu_data
+            oai_req = urllib.request.Request(oai_url, oai_body, {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {oai_key}",
+            })
+            oai_res = urllib.request.urlopen(oai_req, timeout=120)
+            oai_data = _json.loads(oai_res.read())
+            response_text = oai_data["choices"][0]["message"]["content"].strip()
+            menu_data = _json.loads(response_text)
+        except Exception:
+            menu_data = None
 
-    except urllib.error.HTTPError as http_err:
-        err_body = http_err.read().decode()[:300]
-        raise HTTPException(status_code=503, detail=f"OpenAI API error ({http_err.code}): {err_body}")
-    except _json.JSONDecodeError:
-        return {"error": "AI could not parse menu properly", "raw": response_text[:500] if response_text else ""}
-    except HTTPException:
-        raise
+    # Count total items extracted
+    total_items = 0
+    if menu_data and "categories" in menu_data:
+        total_items = sum(len(c.get("items", [])) for c in menu_data["categories"])
+
+    # --- Phase 6: Screenshot + Gemini Vision (always run for best results) ---
+    gemini_key = os.getenv("GEMINI_API_KEY", "")
+    if gemini_key:
+        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}"
+
+        def _parse_gemini_json(raw_text):
+            """Parse JSON from Gemini response, handling ```json wrapping."""
+            t = raw_text.strip()
+            if t.startswith("```"):
+                t = t.split("```", 2)[1]
+                if t.startswith("json"):
+                    t = t[4:]
+            return _json.loads(t)
+
+        gemini_extraction_prompt = """You are extracting a restaurant menu. Return JSON:
+{
+  "restaurant_name": "...",
+  "categories": [
+    {
+      "name": "Category Name",
+      "items": [{"name": "Dish Name", "description": "brief desc", "price_cents": 1299}]
+    }
+  ]
+}
+RULES:
+- price_cents = cents ($12.99 → 1299). Use 0 if unknown.
+- Every category MUST have items. No empty categories.
+- Extract EVERY food item visible, including all categories.
+- Include appetizers, mains, sides, drinks, desserts — everything."""
+
+        # --- 6A: Screenshot-based extraction (Gemini Vision) ---
+        try:
+            # Take a full-page screenshot using thum.io (free, no API key)
+            encoded_url = urllib.parse.quote(url, safe='')
+            screenshot_url = f"https://image.thum.io/get/width/1280/crop/4000/wait/5/noanimate/{url}"
+
+            ss_req = urllib.request.Request(screenshot_url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            })
+            ss_res = urllib.request.urlopen(ss_req, timeout=30)
+            screenshot_bytes = ss_res.read()
+
+            if len(screenshot_bytes) > 5000:  # Valid image (not an error page)
+                import base64
+                screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+
+                # Determine image type from response headers
+                content_type = ss_res.headers.get("Content-Type", "image/png")
+                if "jpeg" in content_type or "jpg" in content_type:
+                    mime_type = "image/jpeg"
+                else:
+                    mime_type = "image/png"
+
+                # Send screenshot to Gemini Vision
+                vision_body = _json.dumps({
+                    "contents": [{
+                        "parts": [
+                            {"text": f"Look at this restaurant menu page screenshot. {gemini_extraction_prompt}"},
+                            {"inline_data": {"mime_type": mime_type, "data": screenshot_b64}}
+                        ]
+                    }],
+                    "generationConfig": {
+                        "temperature": 0.1,
+                        "responseMimeType": "application/json",
+                    }
+                }).encode()
+
+                vision_req = urllib.request.Request(gemini_url, vision_body, {
+                    "Content-Type": "application/json",
+                })
+                vision_res = urllib.request.urlopen(vision_req, timeout=120)
+                vision_data = _json.loads(vision_res.read())
+                vision_text = vision_data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                vision_menu = _parse_gemini_json(vision_text)
+
+                vision_items = sum(len(c.get("items", [])) for c in vision_menu.get("categories", []))
+                if vision_items > total_items:
+                    menu_data = vision_menu
+                    total_items = vision_items
+        except Exception:
+            pass  # Screenshot approach failed, continue
+
+        # --- 6B: Gemini text fallback (if still low items) ---
+        if total_items < 10:
+            try:
+                text_prompt = f"""{gemini_extraction_prompt}
+
+Website text content:
+{content[:30000]}"""
+
+                text_body = _json.dumps({
+                    "contents": [{"parts": [{"text": text_prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0.1,
+                        "responseMimeType": "application/json",
+                    }
+                }).encode()
+
+                text_req = urllib.request.Request(gemini_url, text_body, {
+                    "Content-Type": "application/json",
+                })
+                text_res = urllib.request.urlopen(text_req, timeout=120)
+                text_data = _json.loads(text_res.read())
+                text_text = text_data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                text_menu = _parse_gemini_json(text_text)
+
+                text_items = sum(len(c.get("items", [])) for c in text_menu.get("categories", []))
+                if text_items > total_items:
+                    menu_data = text_menu
+                    total_items = text_items
+            except Exception:
+                pass
+
+    if not menu_data:
+        return {"error": f"Could not extract menu from {pages_scraped} page(s). Try a direct menu page URL."}
+
+    # --- Phase 7: Deterministic price fixer ---
+    # Scan the ORIGINAL raw text (before cleaning) to build item→price map.
+    # The raw text has descriptions with leading spaces, which helps distinguish
+    # item names from descriptions.
+    price_map = {}  # normalized_item_name → price_cents
+    try:
+        # Use original raw text (preserves leading spaces on descriptions)
+        raw_text = "\n".join(all_pages.values())
+        raw_lines = raw_text.split('\n')
+
+        last_item_candidate = None  # The most recent line that looks like an item name
+
+        for i, line in enumerate(raw_lines):
+            original_line = line.rstrip('\r')
+            stripped = original_line.strip()
+
+            if not stripped:
+                continue
+
+            # Check if this line contains a price
+            price_match = re.search(r'\$(\d+(?:\.\d{1,2})?)', stripped)
+            if price_match:
+                price_val = float(price_match.group(1))
+                price_cents = int(round(price_val * 100))
+                if price_cents > 0 and last_item_candidate:
+                    norm = last_item_candidate.upper().strip()
+                    # Don't map to navigation/noise items
+                    skip_names = {'MORE', 'CHECKOUT', 'CHANGE', 'SIGN IN', 'ORDER NOW',
+                                  'HOME', 'MENU', 'ITEMS', 'MOST POPULAR'}
+                    if norm not in skip_names and len(norm) > 2:
+                        if norm not in price_map:
+                            price_map[norm] = price_cents
+                # Don't reset candidate — price lines aren't item names
+                continue
+
+            # Skip navigation links (markdown format)
+            if stripped.startswith('*') or stripped.startswith('[') or stripped.startswith('!'):
+                continue
+            # Skip category headers (lines followed by --- underlines)
+            if i + 1 < len(raw_lines) and set(raw_lines[i + 1].strip()) <= {'-', ' '} and len(raw_lines[i + 1].strip()) > 2:
+                last_item_candidate = None  # Reset — this is a category, not an item
+                continue
+            # Skip horizontal rules
+            if set(stripped) <= {'-', '=', '*', ' '} and len(stripped) > 2:
+                continue
+
+            # Detect descriptions:
+            # 1. Jina Reader: descriptions start with a leading space
+            # 2. Playwright: descriptions start with lowercase or ( 
+            # 3. Both: descriptions are usually longer sentences
+            if original_line.startswith(' ') and not original_line.startswith('  *'):
+                continue  # Jina Reader description
+            if stripped.startswith('('):
+                continue  # Variant description like "(Veg/Chicken)"
+            # Skip lines that start with lowercase (descriptions in Playwright format)
+            if stripped and stripped[0].islower():
+                continue
+            # Skip very long uppercase lines (these are descriptions, not item names)
+            # e.g. "BRUSSEL SPROUTS AND PARSNIPS MARINATED WITH SPICES AND HERBS..."
+            if len(stripped) > 60 and not re.search(r'\$\d', stripped):
+                continue
+
+            # skip common noise
+            noise_words = {'Pickup from', 'Accepted here', 'Shopping Cart',
+                          'Continue Shopping', 'You don', 'Checkout',
+                          'Secure checkout', 'Back to Cart', 'Sign Up',
+                          'Stay in the Loop', 'This form is', 'Helpful',
+                          'Returns Policy', 'ALL SALES', 'Change',
+                          'Accepted here', 'Items'}
+            if any(stripped.startswith(nw) for nw in noise_words):
+                continue
+
+            # This looks like an item name candidate!
+            last_item_candidate = stripped
+
+        # Cross-reference: fill $0 items from price map
+        if price_map and "categories" in menu_data:
+            for cat in menu_data["categories"]:
+                for item in cat.get("items", []):
+                    current_price = item.get("price_cents", 0) or 0
+                    if current_price == 0:
+                        item_upper = item.get("name", "").upper().strip()
+                        # Exact match first
+                        if item_upper in price_map:
+                            item["price_cents"] = price_map[item_upper]
+                        else:
+                            # Fuzzy: check containment both ways
+                            best_match = None
+                            best_score = 0
+                            for map_name, map_price in price_map.items():
+                                # Check if either contains the other
+                                if item_upper in map_name or map_name in item_upper:
+                                    # Score by length of overlap
+                                    score = min(len(item_upper), len(map_name))
+                                    if score > best_score:
+                                        best_score = score
+                                        best_match = map_price
+                            if best_match:
+                                item["price_cents"] = best_match
+    except Exception:
+        pass  # Price fixing failed, continue with AI prices
+
+    menu_data["pages_scraped"] = pages_scraped
+
+    # Remove empty categories
+    if "categories" in menu_data:
+        menu_data["categories"] = [c for c in menu_data["categories"] if c.get("items")]
+
+    # Recount
+    total_items = sum(len(c.get("items", [])) for c in menu_data.get("categories", []))
+    if menu_data.get("error") or total_items == 0:
+        return {"error": f"No menu items found across {pages_scraped} page(s). Try a direct menu page URL or a food delivery page (DoorDash, UberEats, Grubhub)."}
+
+    return menu_data
 
 
 @app.post("/owner/restaurants/{restaurant_id}/import-menu")

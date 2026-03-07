@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { listRestaurants, fetchNearby, login, register, sendMessage } from "./api.js";
+import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, checkout, fetchMyOrders } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
 
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
@@ -91,7 +91,14 @@ export default function App() {
   const [selectedIndex, setSelectedIndex] = useState(0);
 
   // Cart
-  const [cartTotal, setCartTotal] = useState(0);
+  const [cartData, setCartData] = useState(null); // { restaurants: [...], grand_total_cents: 0 }
+  const [showCartPanel, setShowCartPanel] = useState(false);
+  const [checkingOut, setCheckingOut] = useState(false);
+  const [checkoutDone, setCheckoutDone] = useState(null);
+
+  // Order tracking
+  const [myOrders, setMyOrders] = useState([]);
+  const [showOrderTracker, setShowOrderTracker] = useState(false);
 
   // Voice
   const [isListening, setIsListening] = useState(false);
@@ -102,7 +109,25 @@ export default function App() {
   const inputRef = useRef(null);
   const chatEndRef = useRef(null);
 
-  useEffect(() => { if (token) localStorage.setItem("token", token); }, [token]);
+  useEffect(() => {
+    if (token) {
+      localStorage.setItem("token", token);
+      // Load cart on login
+      fetchCart(token).then(setCartData).catch(() => { });
+      // Load orders on login
+      fetchMyOrders(token).then(setMyOrders).catch(() => { });
+    }
+  }, [token]);
+
+  // Poll for order status updates every 15s
+  useEffect(() => {
+    if (!token || showOwnerPortal) return;
+    const interval = setInterval(() => {
+      fetchMyOrders(token).then(setMyOrders).catch(() => { });
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [token, showOwnerPortal]);
+
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
   // Fetch restaurants when location changes
@@ -284,11 +309,9 @@ export default function App() {
         categories: res.categories || null,
         items: res.items || null,
       }]);
-      const m = res.reply.match(/Cart total: \$([0-9.]+)/);
-      if (m) setCartTotal(parseFloat(m[1]));
-      if (res.reply.match(/Added.*Cart total/)) {
-        const m2 = res.reply.match(/\$([0-9.]+)/);
-        if (m2) setCartTotal(parseFloat(m2[1]));
+      // Update cart from cart_summary if present
+      if (res.cart_summary) {
+        setCartData(res.cart_summary);
       }
       setStatus("Ready.");
     } catch (err) {
@@ -354,7 +377,7 @@ export default function App() {
 
   const handleLogout = () => {
     setToken(""); setSessionId(null); setMessages([welcomeMsg]);
-    setCartTotal(0); localStorage.removeItem("token");
+    setCartData(null); setShowCartPanel(false); localStorage.removeItem("token");
   };
 
   const renderContent = (text) => {
@@ -528,12 +551,119 @@ export default function App() {
                 <p className="chat-status">{status}</p>
               </div>
               <div className="chat-header-right">
-                {cartTotal > 0 && (
-                  <button className="cart-btn" onClick={() => doSend("cart")}>🛒 ${cartTotal.toFixed(2)}</button>
+                {cartData && cartData.grand_total_cents > 0 && (
+                  <div style={{ position: "relative" }}>
+                    <button className="cart-btn" onClick={() => setShowCartPanel((v) => !v)}>
+                      🛒 ${(cartData.grand_total_cents / 100).toFixed(2)}
+                      {cartData.restaurants.length > 1 && (
+                        <span style={{
+                          background: "#ef4444", borderRadius: "50%", fontSize: "0.65rem",
+                          padding: "1px 5px", marginLeft: 4, fontWeight: 700, color: "#fff",
+                        }}>{cartData.restaurants.length}</span>
+                      )}
+                    </button>
+                    {showCartPanel && (
+                      <div className="cart-panel">
+                        <div className="cart-panel-header">
+                          <span>🛒 Your Cart</span>
+                          <button className="cart-panel-close" onClick={() => setShowCartPanel(false)}>✕</button>
+                        </div>
+                        <div className="cart-panel-body">
+                          {cartData.restaurants.map((group) => (
+                            <div key={group.restaurant_id} className="cart-restaurant-group">
+                              <div className="cart-restaurant-name">🍽️ {group.restaurant_name}</div>
+                              {group.items.map((item, i) => (
+                                <div key={i} className="cart-item-row">
+                                  <span>{item.quantity}x {item.name}</span>
+                                  <span>${(item.line_total_cents / 100).toFixed(2)}</span>
+                                </div>
+                              ))}
+                              <div className="cart-subtotal">
+                                Subtotal: ${(group.subtotal_cents / 100).toFixed(2)}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="cart-panel-footer">
+                          <div className="cart-grand-total">
+                            Grand Total: ${(cartData.grand_total_cents / 100).toFixed(2)}
+                          </div>
+                          <button
+                            className="cart-checkout-btn"
+                            disabled={checkingOut}
+                            onClick={async () => {
+                              setCheckingOut(true);
+                              try {
+                                const result = await checkout(token);
+                                setCheckoutDone(result);
+                                setCartData(null);
+                                setShowCartPanel(false);
+                                // Refresh cart
+                                setTimeout(async () => {
+                                  try {
+                                    const c = await fetchCart(token);
+                                    setCartData(c);
+                                  } catch { }
+                                  setCheckoutDone(null);
+                                }, 5000);
+                              } catch (err) {
+                                alert(err.message || "Checkout failed");
+                              }
+                              setCheckingOut(false);
+                            }}
+                          >
+                            {checkingOut ? "⏳ Placing Order..." : "🛒 Place Order"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 )}
                 <button className="ghost" onClick={handleLogout}>Log out</button>
               </div>
             </div>
+
+            {/* Order Tracker — Collapsible toggle */}
+            {myOrders.length > 0 && (
+              <div className={`order-tracker-panel ${showOrderTracker ? 'expanded' : 'collapsed'}`}>
+                <div className="order-tracker-header" onClick={() => setShowOrderTracker(!showOrderTracker)}>
+                  <span>📦 My Orders ({myOrders.filter(o => !['completed', 'rejected'].includes(o.status) || (Date.now() - new Date(o.created_at).getTime() < 3600000)).length})</span>
+                  <button className="order-tracker-toggle">{showOrderTracker ? '▲' : '▼'}</button>
+                </div>
+                {showOrderTracker && (
+                  <div className="order-tracker-body">
+                    {myOrders.filter(o => !['completed', 'rejected'].includes(o.status) || (Date.now() - new Date(o.created_at).getTime() < 3600000)).slice(0, 5).map(order => {
+                      const steps = ['confirmed', 'accepted', 'preparing', 'ready', 'completed'];
+                      const isRejected = order.status === 'rejected';
+                      const currentStep = isRejected ? -1 : steps.indexOf(order.status);
+                      return (
+                        <div key={order.id} className={`order-tracker-card ${isRejected ? 'rejected' : ''}`}>
+                          <div className="order-tracker-restaurant">
+                            <span>🍽️ {order.restaurant_name}</span>
+                            <span className="order-tracker-total">${(order.total_cents / 100).toFixed(2)}</span>
+                          </div>
+                          <div className="order-tracker-items-summary">
+                            {order.items.map((it, i) => `${it.quantity}x ${it.name}`).join(', ')}
+                          </div>
+                          {isRejected ? (
+                            <div className="order-tracker-rejected">❌ Order Rejected</div>
+                          ) : (
+                            <div className="order-tracker-steps">
+                              {steps.map((s, i) => (
+                                <div key={s} className={`order-step ${i <= currentStep ? 'active' : ''} ${i === currentStep ? 'current' : ''}`}>
+                                  <div className="order-step-dot" />
+                                  <span className="order-step-label">{s === 'confirmed' ? 'Ordered' : s.charAt(0).toUpperCase() + s.slice(1)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="chat-window">
               {messages.map((msg, idx) => (
