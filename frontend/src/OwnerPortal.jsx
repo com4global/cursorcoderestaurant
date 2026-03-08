@@ -532,91 +532,99 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
             {importRestId && (
                 <div className="owner-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setImportRestId(null); }}>
                     <div className="owner-modal">
-                        <div className="owner-modal-header">
-                            <h3>
-                                🤖 AI Menu Import
-                                <span className="owner-import-for">
-                                    for {myRestaurants.find((r) => r.id === importRestId)?.name}
-                                </span>
-                            </h3>
-                            <button className="owner-modal-close" onClick={() => setImportRestId(null)}>✕</button>
-                        </div>
-                        <p className="owner-modal-desc">Paste the restaurant's website/menu URL and our AI will extract the full menu automatically.</p>
-
-                        <div className="owner-import-row">
-                            <input
-                                className="owner-import-input"
-                                value={importUrl}
-                                onChange={(e) => setImportUrl(e.target.value)}
-                                placeholder="https://restaurant-website.com/menu"
-                                autoFocus
-                            />
-                            <button
-                                className="owner-extract-btn"
-                                onClick={handleImportMenu}
-                                disabled={importLoading}
-                            >
-                                {importLoading ? "⏳ Extracting..." : "🔮 Extract Menu"}
-                            </button>
-                        </div>
-
-                        {importLoading && (
-                            <div className="owner-import-loading">
-                                <div className="owner-progress-bar">
-                                    <div className="owner-progress-fill"></div>
-                                </div>
-                                <p>Crawling menu pages with JS rendering... This may take 60-90 seconds for large sites.</p>
-                            </div>
-                        )}
-
-                        {importError && <p className="owner-error">{importError}</p>}
-
-                        {importedMenu && (
-                            <div className="owner-extracted">
-                                <div className="owner-extracted-header">
-                                    <h4>✅ Extracted: {importedMenu.restaurant_name || "Menu"}</h4>
-                                    <span className="owner-extracted-stats">
-                                        {importedMenu.pages_scraped > 1 && `${importedMenu.pages_scraped} pages · `}
-                                        {importedMenu.categories?.length || 0} categories · {importedMenu.categories?.reduce((s, c) => s + (c.items?.length || 0), 0) || 0} items
+                        {/* Scrollable body */}
+                        <div className="owner-modal-body">
+                            <div className="owner-modal-header">
+                                <h3>
+                                    🤖 AI Menu Import
+                                    <span className="owner-import-for">
+                                        for {myRestaurants.find((r) => r.id === importRestId)?.name}
                                     </span>
-                                </div>
+                                </h3>
+                                <button className="owner-modal-close" onClick={() => setImportRestId(null)}>✕</button>
+                            </div>
+                            <p className="owner-modal-desc">Paste the restaurant's website/menu URL and our AI will extract the full menu automatically.</p>
 
-                                <div className="owner-edit-hint">✏️ Edit names, descriptions, and prices below. Use "+ Add Item" to add items manually.</div>
-
-                                <div className="owner-menu-preview">
-                                    {importedMenu.categories?.map((cat, ci) => (
-                                        <div key={ci} className="owner-menu-category">
-                                            <div className="owner-cat-header">
-                                                <input
-                                                    className="owner-cat-name-input"
-                                                    value={cat.name}
-                                                    onChange={(e) => updateCategoryName(ci, e.target.value)}
-                                                />
-                                                <span className="owner-item-count">{cat.items?.length || 0}</span>
-                                            </div>
-                                            {cat.items?.map((item, ii) => (
-                                                <div key={ii} className="owner-menu-item-row">
-                                                    <div className="owner-item-fields">
-                                                        <input className="owner-item-name" value={item.name} onChange={(e) => updateItem(ci, ii, "name", e.target.value)} placeholder="Item name" />
-                                                        <input className="owner-item-desc" value={item.description || ""} onChange={(e) => updateItem(ci, ii, "description", e.target.value)} placeholder="Description" />
-                                                    </div>
-                                                    <div className="owner-item-price-group">
-                                                        <span className="owner-dollar">$</span>
-                                                        <input className="owner-item-price" type="number" step="0.01" value={item.price || 0} onChange={(e) => updateItem(ci, ii, "price", e.target.value)} />
-                                                        <button className="owner-item-delete" onClick={() => deleteItem(ci, ii)}>✕</button>
-                                                    </div>
-                                                </div>
-                                            ))}
-                                            <button className="owner-add-item-btn" onClick={() => addItem(ci)}>+ Add Item</button>
-                                        </div>
-                                    ))}
-                                    <button className="owner-add-cat-btn" onClick={addCategory}>+ Add Category</button>
-                                </div>
-
-                                <button className="owner-save-btn" onClick={handleSaveMenu} disabled={saveStatus === "saving"}>
-                                    {saveStatus === "saving" ? "Saving..." : saveStatus === "saved" ? "✅ Saved!" : "💾 Save Menu to Restaurant"}
+                            <div className="owner-import-row">
+                                <input
+                                    className="owner-import-input"
+                                    value={importUrl}
+                                    onChange={(e) => setImportUrl(e.target.value)}
+                                    placeholder="https://restaurant-website.com/menu"
+                                    autoFocus
+                                />
+                                <button
+                                    className="owner-extract-btn"
+                                    onClick={handleImportMenu}
+                                    disabled={importLoading}
+                                >
+                                    {importLoading ? "⏳ Extracting..." : "🔮 Extract Menu"}
                                 </button>
-                                {saveStatus === "error" && <p className="owner-error">Failed to save menu.</p>}
+                            </div>
+
+                            {importLoading && (
+                                <div className="owner-import-loading">
+                                    <div className="owner-progress-bar">
+                                        <div className="owner-progress-fill"></div>
+                                    </div>
+                                    <p>Crawling menu pages with JS rendering... This may take 60-90 seconds for large sites.</p>
+                                </div>
+                            )}
+
+                            {importError && <p className="owner-error">{importError}</p>}
+
+                            {importedMenu && (
+                                <div className="owner-extracted">
+                                    <div className="owner-extracted-header">
+                                        <h4>✅ Extracted: {importedMenu.restaurant_name || "Menu"}</h4>
+                                        <span className="owner-extracted-stats">
+                                            {importedMenu.pages_scraped > 1 && `${importedMenu.pages_scraped} pages · `}
+                                            {importedMenu.categories?.length || 0} categories · {importedMenu.categories?.reduce((s, c) => s + (c.items?.length || 0), 0) || 0} items
+                                        </span>
+                                    </div>
+
+                                    <div className="owner-edit-hint">✏️ Edit names, descriptions, and prices below. Use "+ Add Item" to add items manually.</div>
+
+                                    <div className="owner-menu-preview">
+                                        {importedMenu.categories?.map((cat, ci) => (
+                                            <div key={ci} className="owner-menu-category">
+                                                <div className="owner-cat-header">
+                                                    <input
+                                                        className="owner-cat-name-input"
+                                                        value={cat.name}
+                                                        onChange={(e) => updateCategoryName(ci, e.target.value)}
+                                                    />
+                                                    <span className="owner-item-count">{cat.items?.length || 0}</span>
+                                                </div>
+                                                {cat.items?.map((item, ii) => (
+                                                    <div key={ii} className="owner-menu-item-row">
+                                                        <div className="owner-item-fields">
+                                                            <input className="owner-item-name" value={item.name} onChange={(e) => updateItem(ci, ii, "name", e.target.value)} placeholder="Item name" />
+                                                            <input className="owner-item-desc" value={item.description || ""} onChange={(e) => updateItem(ci, ii, "description", e.target.value)} placeholder="Description" />
+                                                        </div>
+                                                        <div className="owner-item-price-group">
+                                                            <span className="owner-dollar">$</span>
+                                                            <input className="owner-item-price" type="number" step="0.01" value={item.price || 0} onChange={(e) => updateItem(ci, ii, "price", e.target.value)} />
+                                                            <button className="owner-item-delete" onClick={() => deleteItem(ci, ii)}>✕</button>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                                <button className="owner-add-item-btn" onClick={() => addItem(ci)}>+ Add Item</button>
+                                            </div>
+                                        ))}
+                                        <button className="owner-add-cat-btn" onClick={addCategory}>+ Add Category</button>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Sticky footer with save button — always visible */}
+                        {importedMenu && (
+                            <div className="owner-modal-footer">
+                                <button className="owner-save-btn" onClick={handleSaveMenu} disabled={saveStatus === "saving"}>
+                                    {saveStatus === "saving" ? "⏳ Saving..." : saveStatus === "saved" ? "✅ Saved Successfully!" : "💾 Save Menu to Restaurant"}
+                                </button>
+                                {saveStatus === "error" && <span style={{ color: "#fca5a5", fontSize: "0.85rem" }}>Failed to save. Try again.</span>}
                             </div>
                         )}
                     </div>

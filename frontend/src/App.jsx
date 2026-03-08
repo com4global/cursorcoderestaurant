@@ -84,6 +84,10 @@ export default function App() {
   const [userLng, setUserLng] = useState(null);
   const [locationLabel, setLocationLabel] = useState("");
   const [locating, setLocating] = useState(false);
+  const [citySearch, setCitySearch] = useState("");
+  const [citySuggestions, setCitySuggestions] = useState([]);
+  const [showCitySuggestions, setShowCitySuggestions] = useState(false);
+  const citySearchTimeout = useRef(null);
 
   // Autocomplete
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -105,6 +109,10 @@ export default function App() {
 
   // Owner Portal
   const [showOwnerPortal, setShowOwnerPortal] = useState(false);
+
+  // Sticky category sidebar
+  const [activeCategories, setActiveCategories] = useState([]);
+  const [activeCategoryName, setActiveCategoryName] = useState(null);
 
   const inputRef = useRef(null);
   const chatEndRef = useRef(null);
@@ -212,7 +220,9 @@ export default function App() {
       const lng = parseFloat(place.longitude);
       setUserLat(lat);
       setUserLng(lng);
-      setLocationLabel(`${place["place name"]}, ${place["state abbreviation"]}`);
+      const cityLabel = `${place["place name"]}, ${place["state abbreviation"]}`;
+      setLocationLabel(cityLabel);
+      setCitySearch(cityLabel);
       await fetchRestaurants(lat, lng, radius);
     } catch {
       fetchRestaurants(null, null, radius);
@@ -233,7 +243,9 @@ export default function App() {
       const lng = parseFloat(place.longitude);
       setUserLat(lat);
       setUserLng(lng);
-      setLocationLabel(`${place["place name"]}, ${place["state abbreviation"]}`);
+      const cityLabel = `${place["place name"]}, ${place["state abbreviation"]}`;
+      setLocationLabel(cityLabel);
+      setCitySearch(cityLabel);
       localStorage.setItem("zipcode", zip);
       localStorage.setItem("radius", radius);
       await fetchRestaurants(lat, lng, radius);
@@ -241,6 +253,75 @@ export default function App() {
       setLocationLabel("Invalid zipcode");
     }
     setLocating(false);
+  };
+
+  // Auto-trigger zipcode lookup when 5 digits entered
+  const handleZipcodeChange = (val) => {
+    const cleaned = val.replace(/\D/g, "").slice(0, 5);
+    setZipcode(cleaned);
+    if (cleaned.length === 5) {
+      lookupZipcode(cleaned);
+    }
+  };
+
+  // --- City search with suggestions ---
+  const searchCity = async (query) => {
+    if (!query || query.length < 2) {
+      setCitySuggestions([]);
+      return;
+    }
+    try {
+      // Search US cities via postal API (try multiple states)
+      const states = ["SC", "NC", "GA", "VA", "FL", "TX", "CA", "NY", "PA", "OH", "IL", "NJ", "MA"];
+      const results = [];
+      const seenZips = new Set();
+      // Use the Nominatim (OpenStreetMap) geocoder for city search
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)},US&format=json&addressdetails=1&limit=6&countrycodes=us`);
+      if (res.ok) {
+        const data = await res.json();
+        for (const item of data) {
+          const addr = item.address || {};
+          const city = addr.city || addr.town || addr.village || addr.county || "";
+          const state = addr.state || "";
+          const postcode = addr.postcode || "";
+          const zip5 = postcode.split("-")[0].split(" ")[0];
+          const key = `${city}-${state}-${zip5}`;
+          if (city && !seenZips.has(key)) {
+            seenZips.add(key);
+            results.push({
+              city,
+              state,
+              zipcode: zip5,
+              lat: parseFloat(item.lat),
+              lng: parseFloat(item.lon),
+              display: `${city}, ${state}${zip5 ? " · " + zip5 : ""}`
+            });
+          }
+        }
+      }
+      setCitySuggestions(results.slice(0, 5));
+      setShowCitySuggestions(results.length > 0);
+    } catch {
+      setCitySuggestions([]);
+    }
+  };
+
+  const handleCitySearchChange = (val) => {
+    setCitySearch(val);
+    if (citySearchTimeout.current) clearTimeout(citySearchTimeout.current);
+    citySearchTimeout.current = setTimeout(() => searchCity(val), 400);
+  };
+
+  const selectCity = async (suggestion) => {
+    setZipcode(suggestion.zipcode || "");
+    setCitySearch(`${suggestion.city}, ${suggestion.state}`);
+    setLocationLabel(`${suggestion.city}, ${suggestion.state}`);
+    setUserLat(suggestion.lat);
+    setUserLng(suggestion.lng);
+    setShowCitySuggestions(false);
+    if (suggestion.zipcode) localStorage.setItem("zipcode", suggestion.zipcode);
+    localStorage.setItem("radius", radius);
+    await fetchRestaurants(suggestion.lat, suggestion.lng, radius);
   };
 
   const useMyLocation = () => {
@@ -309,6 +390,15 @@ export default function App() {
         categories: res.categories || null,
         items: res.items || null,
       }]);
+      // Capture categories for sticky sidebar
+      if (res.categories && res.categories.length > 0) {
+        setActiveCategories(res.categories);
+        setActiveCategoryName(null);
+      }
+      // Track which category is active
+      if (res.items && res.items.length > 0) {
+        setActiveCategoryName(text.trim());
+      }
       // Update cart from cart_summary if present
       if (res.cart_summary) {
         setCartData(res.cart_summary);
@@ -320,7 +410,7 @@ export default function App() {
   };
 
   const handleSend = (e) => { e.preventDefault(); doSend(messageText); };
-  const handleCategoryClick = (cat) => doSend(cat.name);
+  const handleCategoryClick = (cat) => { setActiveCategoryName(cat.name); doSend(cat.name); };
   const handleAddItem = (item) => doSend(`add:${item.id}:1`);
 
   // --- # autocomplete ---
@@ -378,6 +468,7 @@ export default function App() {
   const handleLogout = () => {
     setToken(""); setSessionId(null); setMessages([welcomeMsg]);
     setCartData(null); setShowCartPanel(false); localStorage.removeItem("token");
+    setActiveCategories([]); setActiveCategoryName(null);
   };
 
   const renderContent = (text) => {
@@ -405,21 +496,40 @@ export default function App() {
           <input
             className="zip-input"
             type="text"
-            placeholder="Enter zipcode"
+            placeholder="Zip"
             value={zipcode}
-            onChange={(e) => setZipcode(e.target.value)}
+            onChange={(e) => handleZipcodeChange(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") lookupZipcode(zipcode); }}
             maxLength={5}
           />
-          <button className="location-btn" onClick={() => lookupZipcode(zipcode)} disabled={locating}>
-            {locating ? "..." : "Go"}
-          </button>
+          <div className="city-search-wrapper">
+            <input
+              className="city-input"
+              type="text"
+              placeholder="Search city..."
+              value={citySearch}
+              onChange={(e) => handleCitySearchChange(e.target.value)}
+              onFocus={() => { if (citySuggestions.length > 0) setShowCitySuggestions(true); }}
+              onBlur={() => setTimeout(() => setShowCitySuggestions(false), 200)}
+            />
+            {showCitySuggestions && citySuggestions.length > 0 && (
+              <div className="city-suggestions">
+                {citySuggestions.map((s, i) => (
+                  <div key={i} className="city-suggestion-item" onMouseDown={() => selectCity(s)}>
+                    <span className="city-suggestion-name">{s.city}, {s.state}</span>
+                    {s.zipcode && <span className="city-suggestion-zip">{s.zipcode}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           <button className="location-btn gps-btn" onClick={useMyLocation} disabled={locating} title="Use my location">
             🎯
           </button>
         </div>
         <div className="location-center">
-          {locationLabel && <span className="location-label">{locationLabel}</span>}
+          {locating && <span className="location-label">⏳ Looking up...</span>}
+          {!locating && locationLabel && <span className="location-label">{locationLabel}</span>}
         </div>
         <div className="location-right">
           <button
@@ -665,72 +775,107 @@ export default function App() {
               </div>
             )}
 
-            <div className="chat-window">
-              {messages.map((msg, idx) => (
-                <div key={idx}>
-                  {msg.role === "user" && msg.content.startsWith("add:") ? null : (
-                    <motion.div
-                      className={`bubble ${msg.role}`}
-                      initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                      animate={{ opacity: 1, y: 0, scale: 1 }}
-                      transition={{ duration: 0.3 }}
-                    >{renderContent(msg.content)}</motion.div>
-                  )}
-                  {msg.categories && (
-                    <motion.div
-                      className="chips-row"
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      transition={{ duration: 0.4, delay: 0.1 }}
-                    >
-                      {msg.categories.map((cat, ci) => (
+            <div className="chat-body-row">
+              <div className="chat-window">
+                {messages.map((msg, idx) => (
+                  <div key={idx}>
+                    {msg.role === "user" && msg.content.startsWith("add:") ? null : (
+                      <motion.div
+                        className={`bubble ${msg.role}`}
+                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        transition={{ duration: 0.3 }}
+                      >{renderContent(msg.content)}</motion.div>
+                    )}
+                    {msg.categories && (
+                      <motion.div
+                        className="chips-row"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        transition={{ duration: 0.4, delay: 0.1 }}
+                      >
+                        {msg.categories.map((cat, ci) => (
+                          <motion.button
+                            key={cat.id}
+                            className="chip"
+                            onClick={() => handleCategoryClick(cat)}
+                            initial={{ opacity: 0, scale: 0.8 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            transition={{ delay: ci * 0.06, duration: 0.3 }}
+                            whileHover={{ scale: 1.08 }}
+                            whileTap={{ scale: 0.95 }}
+                          >
+                            <span className="chip-emoji">{getFoodEmoji(cat.name)}</span>
+                            <span className="chip-name">{cat.name}</span>
+                            <span className="chip-count">{cat.item_count}</span>
+                          </motion.button>
+                        ))}
+                      </motion.div>
+                    )}
+                    {msg.items && (
+                      <div className="items-grid">
+                        {msg.items.map((item, ii) => (
+                          <motion.div
+                            key={item.id}
+                            className="item-card"
+                            initial={{ opacity: 0, x: -15 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            transition={{ delay: ii * 0.05, duration: 0.3 }}
+                            whileHover={{ scale: 1.02 }}
+                          >
+                            <span className="item-emoji">{getFoodEmoji(item.name)}</span>
+                            <div className="item-info">
+                              <span className="item-name">{item.name}</span>
+                              {item.description && <span className="item-desc">{item.description}</span>}
+                              <span className="item-price">${(item.price_cents / 100).toFixed(2)}</span>
+                            </div>
+                            <motion.button
+                              className="add-btn"
+                              onClick={() => handleAddItem(item)}
+                              whileHover={{ scale: 1.2 }}
+                              whileTap={{ scale: 0.9 }}
+                            >+</motion.button>
+                          </motion.div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <div ref={chatEndRef} />
+              </div>
+
+              {/* Sticky Category Sidebar */}
+              <AnimatePresence>
+                {activeCategories.length > 0 && (
+                  <motion.div
+                    className="category-sidebar"
+                    initial={{ opacity: 0, x: 40 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: 40 }}
+                    transition={{ duration: 0.3 }}
+                  >
+                    <div className="category-sidebar-header">
+                      <span>📂 Categories</span>
+                      <button className="category-sidebar-close" onClick={() => setActiveCategories([])}>✕</button>
+                    </div>
+                    <div className="category-sidebar-list">
+                      {activeCategories.map((cat) => (
                         <motion.button
                           key={cat.id}
-                          className="chip"
+                          className={`category-sidebar-item ${activeCategoryName === cat.name ? 'active' : ''}`}
                           onClick={() => handleCategoryClick(cat)}
-                          initial={{ opacity: 0, scale: 0.8 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          transition={{ delay: ci * 0.06, duration: 0.3 }}
-                          whileHover={{ scale: 1.08 }}
-                          whileTap={{ scale: 0.95 }}
+                          whileHover={{ scale: 1.03, x: 3 }}
+                          whileTap={{ scale: 0.97 }}
                         >
-                          <span className="chip-emoji">{getFoodEmoji(cat.name)}</span>
-                          <span className="chip-name">{cat.name}</span>
-                          <span className="chip-count">{cat.item_count}</span>
+                          <span className="category-sidebar-emoji">{getFoodEmoji(cat.name)}</span>
+                          <span className="category-sidebar-name">{cat.name}</span>
+                          <span className="category-sidebar-count">{cat.item_count}</span>
                         </motion.button>
                       ))}
-                    </motion.div>
-                  )}
-                  {msg.items && (
-                    <div className="items-grid">
-                      {msg.items.map((item, ii) => (
-                        <motion.div
-                          key={item.id}
-                          className="item-card"
-                          initial={{ opacity: 0, x: -15 }}
-                          animate={{ opacity: 1, x: 0 }}
-                          transition={{ delay: ii * 0.05, duration: 0.3 }}
-                          whileHover={{ scale: 1.02 }}
-                        >
-                          <span className="item-emoji">{getFoodEmoji(item.name)}</span>
-                          <div className="item-info">
-                            <span className="item-name">{item.name}</span>
-                            {item.description && <span className="item-desc">{item.description}</span>}
-                            <span className="item-price">${(item.price_cents / 100).toFixed(2)}</span>
-                          </div>
-                          <motion.button
-                            className="add-btn"
-                            onClick={() => handleAddItem(item)}
-                            whileHover={{ scale: 1.2 }}
-                            whileTap={{ scale: 0.9 }}
-                          >+</motion.button>
-                        </motion.div>
-                      ))}
                     </div>
-                  )}
-                </div>
-              ))}
-              <div ref={chatEndRef} />
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
 
             <div className="chat-input-wrapper">

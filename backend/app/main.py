@@ -3,6 +3,7 @@ import json as _json
 import os
 import urllib.request
 import urllib.error
+import urllib.parse
 
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -468,8 +469,24 @@ def update_notifications(restaurant_id: int, payload: dict, db: Session = Depend
     return {"ok": True}
 
 
-# --- Email notification helper ---
-def _send_order_notification(restaurant, order, items, customer_email, db):
+# --- Multi-channel notification helpers ---
+
+def _build_notification_message(restaurant, order, items, customer_email):
+    """Build the notification text shared across all channels."""
+    items_text = "\n".join([f"  • {i['name']} x{i['quantity']} — ${i['price_cents']/100:.2f}" for i in items])
+    total = f"${order.total_cents/100:.2f}"
+    return f"""🔔 New Order #{order.id} — {restaurant.name}
+
+👤 Customer: {customer_email}
+💰 Total: {total}
+
+Items:
+{items_text}
+
+Log in to your Owner Dashboard to accept or reject this order."""
+
+
+def _send_email_notification(restaurant, order, items, customer_email, db):
     """Send email notification to restaurant owner about new order."""
     import smtplib
     from email.mime.text import MIMEText
@@ -483,31 +500,15 @@ def _send_order_notification(restaurant, order, items, customer_email, db):
 
     to_email = restaurant.notification_email
     if not to_email:
-        # Fall back to owner's login email
         owner = db.query(models.User).get(restaurant.owner_id)
         to_email = owner.email if owner else None
 
     if not to_email or not smtp_user:
-        return  # No email configured
+        print(f"[Notification] Email skipped — no recipient or SMTP config")
+        return
 
-    # Build email
-    items_text = "\n".join([f"  • {i['name']} x{i['quantity']} — ${i['price_cents']/100:.2f}" for i in items])
-    total = f"${order.total_cents/100:.2f}"
-
+    body = _build_notification_message(restaurant, order, items, customer_email)
     subject = f"🔔 New Order #{order.id} — {restaurant.name}"
-    body = f"""New order received!
-
-📋 Order #{order.id}
-🏪 Restaurant: {restaurant.name}
-👤 Customer: {customer_email}
-💰 Total: {total}
-
-Items:
-{items_text}
-
----
-Log in to your Owner Dashboard to accept or reject this order.
-"""
 
     try:
         msg = MIMEMultipart()
@@ -520,8 +521,122 @@ Log in to your Owner Dashboard to accept or reject this order.
             server.starttls()
             server.login(smtp_user, smtp_pass)
             server.sendmail(smtp_user, to_email, msg.as_string())
+        print(f"[Notification] ✅ Email sent to {to_email} for order #{order.id}")
     except Exception as e:
-        print(f"[Notification] Email failed: {e}")
+        print(f"[Notification] ❌ Email failed: {e}")
+
+
+def _send_sms_notification(restaurant, order, items, customer_email, db):
+    """Send SMS notification via Twilio REST API."""
+    load_dotenv()
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
+    from_number = os.getenv("TWILIO_PHONE_NUMBER", "")
+
+    to_phone = restaurant.notification_phone
+    if not to_phone:
+        print(f"[Notification] SMS skipped — no phone number configured")
+        return
+
+    if not account_sid or account_sid == "your_account_sid_here":
+        print(f"[Notification] SMS skipped — Twilio credentials not configured")
+        return
+
+    # Short message for SMS (trial accounts limited to 160 chars / single segment)
+    item_count = sum(i['quantity'] for i in items)
+    total = order.total_cents / 100
+    body = "New Order #{} - {} item(s) ${:.2f} from {}. Check your dashboard.".format(
+        order.id, item_count, total, customer_email.split('@')[0]
+    )
+    if len(body) > 155:
+        body = body[:152] + "..."
+
+    try:
+        import base64
+        url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+        data = urllib.parse.urlencode({
+            "To": to_phone,
+            "From": from_number,
+            "Body": body,
+        }).encode()
+
+        credentials = base64.b64encode(f"{account_sid}:{auth_token}".encode()).decode()
+        req = urllib.request.Request(url, data, {
+            "Authorization": f"Basic {credentials}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        })
+        res = urllib.request.urlopen(req, timeout=30)
+        result = _json.loads(res.read())
+        print(f"[Notification] ✅ SMS sent to {to_phone} — SID: {result.get('sid', '?')}")
+    except Exception as e:
+        print(f"[Notification] ❌ SMS failed: {e}")
+
+
+def _send_whatsapp_notification(restaurant, order, items, customer_email, db):
+    """Send WhatsApp notification via Twilio WhatsApp API."""
+    load_dotenv()
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
+    from_whatsapp = os.getenv("TWILIO_WHATSAPP_NUMBER", "")
+
+    to_phone = restaurant.notification_phone
+    if not to_phone:
+        print(f"[Notification] WhatsApp skipped — no phone number configured")
+        return
+
+    if not account_sid or account_sid == "your_account_sid_here":
+        print(f"[Notification] WhatsApp skipped — Twilio credentials not configured")
+        return
+
+    body = _build_notification_message(restaurant, order, items, customer_email)
+
+    try:
+        import base64
+        url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+        data = urllib.parse.urlencode({
+            "To": f"whatsapp:{to_phone}",
+            "From": f"whatsapp:{from_whatsapp}",
+            "Body": body,
+        }).encode()
+
+        credentials = base64.b64encode(f"{account_sid}:{auth_token}".encode()).decode()
+        req = urllib.request.Request(url, data, {
+            "Authorization": f"Basic {credentials}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        })
+        res = urllib.request.urlopen(req, timeout=30)
+        result = _json.loads(res.read())
+        print(f"[Notification] ✅ WhatsApp sent to {to_phone} — SID: {result.get('sid', '?')}")
+    except Exception as e:
+        print(f"[Notification] ❌ WhatsApp failed: {e}")
+
+
+def _send_all_notifications(restaurant, order, items, customer_email, db):
+    """Dispatch all notification channels. Each channel is independent — one failure won't block others.
+    Phase 1: All 3 fire on every order for testing.
+    Phase 2: Respect owner preferences (email/sms/whatsapp toggles).
+    """
+    print(f"[Notification] === Sending notifications for Order #{order.id} ({restaurant.name}) ===")
+
+    # Channel 1: Email
+    try:
+        _send_email_notification(restaurant, order, items, customer_email, db)
+    except Exception as e:
+        print(f"[Notification] Email channel error: {e}")
+
+    # Channel 2: SMS
+    try:
+        _send_sms_notification(restaurant, order, items, customer_email, db)
+    except Exception as e:
+        print(f"[Notification] SMS channel error: {e}")
+
+    # Channel 3: WhatsApp
+    try:
+        _send_whatsapp_notification(restaurant, order, items, customer_email, db)
+    except Exception as e:
+        print(f"[Notification] WhatsApp channel error: {e}")
+
+    print(f"[Notification] === Done for Order #{order.id} ===")
 
 
 # --- Customer: Checkout ---
@@ -555,10 +670,10 @@ def checkout(db: Session = Depends(get_db), current_user=Depends(get_current_use
             "items": items,
         })
 
-        # Send notification
+        # Send notifications (email + SMS + WhatsApp)
         if rest:
             try:
-                _send_order_notification(rest, order, items, current_user.email, db)
+                _send_all_notifications(rest, order, items, current_user.email, db)
             except Exception as e:
                 print(f"[Notification] Failed for order {order.id}: {e}")
 
@@ -627,8 +742,8 @@ def import_menu_from_url(
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
                 page = browser.new_page(viewport={"width": 1280, "height": 900})
-                page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(3000)
+                page.goto(target_url, wait_until="networkidle", timeout=45000)
+                page.wait_for_timeout(8000)  # Extra wait for SPA frameworks to fetch API data and render
 
                 # Step 1: Scroll through to trigger initial lazy loading
                 prev_height = 0
@@ -641,41 +756,133 @@ def import_menu_from_url(
                     prev_height = curr
 
                 # Step 2: Find and click all category/section nav links
-                # Square/Weebly sites have nav links that load categories on click
+                # Supports: Square/Weebly hash-anchor links, Froogal sidebars,
+                # and other SPA frameworks with clickable category navigation.
                 try:
-                    cat_links = page.evaluate("""() => {
-                        const links = [];
-                        // Find all anchor links within the page that point to sections
+                    cat_elements = page.evaluate("""() => {
+                        const results = [];
+                        const skipTexts = new Set([
+                            'HOME', 'MENU', 'MORE', 'CONTACT', 'CONTACT US',
+                            'GIFT CARDS', 'SIGN IN', 'ORDER NOW', 'CHECKOUT',
+                            'LOGIN', 'ABOUT', 'REWARDS', 'LOCATIONS', 'FRANCHISE',
+                            'CATERING', 'PICKUP', 'DELIVERY', 'DINE IN',
+                            'SEARCH ANY ITEM', 'TODAY', 'CHANGE',
+                        ]);
+
+                        // --- Strategy 1: Hash-anchor links (Square/Weebly) ---
                         document.querySelectorAll('a[href*="#"]').forEach(a => {
-                            const href = a.getAttribute('href');
                             const text = a.innerText.trim();
-                            if (text && text.length > 2 && text.length < 60 && href) {
-                                links.push({href: href, text: text});
+                            if (text && text.length > 2 && text.length < 60) {
+                                const href = a.getAttribute('href');
+                                results.push({selector: `a[href="${href}"]`, text: text});
                             }
                         });
-                        return links;
+
+                        // --- Strategy 2: Known sidebar/category selectors ---
+                        const sidebarSelectors = [
+                            '[class*="category"] a', '[class*="category"] button',
+                            '[class*="category"] div[role="button"]',
+                            '[class*="sidebar"] a', '[class*="sidebar"] li',
+                            '[class*="menu-nav"] a', '[class*="menuNav"] a',
+                            '[class*="side-menu"] a', '[class*="sideMenu"] a',
+                            '[role="tab"]', '[role="menuitem"]',
+                            'nav[class*="menu"] a', 'aside a',
+                        ];
+                        for (const sel of sidebarSelectors) {
+                            document.querySelectorAll(sel).forEach(el => {
+                                const text = el.innerText.trim();
+                                if (text && text.length > 2 && text.length < 60) {
+                                    // Build a unique CSS path for clicking
+                                    results.push({selector: null, text: text, tag: el.tagName});
+                                }
+                            });
+                        }
+
+                        // --- Strategy 3: Universal sidebar detection ---
+                        // Find vertical lists of short-text clickable items (typical SPA category nav)
+                        // Look for containers with many children that have short text
+                        const containers = document.querySelectorAll('ul, ol, div, nav, aside');
+                        let bestContainer = null;
+                        let bestCount = 0;
+                        for (const c of containers) {
+                            const children = c.children;
+                            if (children.length < 5) continue;
+                            let menuLike = 0;
+                            for (const child of children) {
+                                const t = child.innerText.trim();
+                                if (t && t.length > 2 && t.length < 60 && t.indexOf(String.fromCharCode(10)) === -1) {
+                                    menuLike++;
+                                }
+                            }
+                            // A container where most children are short text = likely category nav
+                            if (menuLike > bestCount && menuLike >= 5 && menuLike / children.length > 0.6) {
+                                bestCount = menuLike;
+                                bestContainer = c;
+                            }
+                        }
+                        if (bestContainer && bestCount > results.length) {
+                            // This is likely the sidebar — add its children as candidates
+                            results.length = 0;  // Clear previous, this is more reliable
+                            for (const child of bestContainer.children) {
+                                const t = child.innerText.trim();
+                                if (t && t.length > 2 && t.length < 60 && t.indexOf(String.fromCharCode(10)) === -1) {
+                                    results.push({selector: null, text: t, tag: child.tagName, fromSidebar: true});
+                                }
+                            }
+                        }
+
+                        // Deduplicate by text
+                        const seen = new Set();
+                        const unique = [];
+                        for (const r of results) {
+                            const key = r.text.toUpperCase();
+                            if (!seen.has(key) && !skipTexts.has(key)) {
+                                seen.add(key);
+                                unique.push(r);
+                            }
+                        }
+                        return unique;
                     }""")
 
-                    # Click each category link to force-load its items
+                    # Click each category element to force-load its items
                     clicked = set()
-                    for link_info in cat_links:
-                        link_text = link_info.get("text", "").upper()
-                        # Skip non-menu navigation links
-                        if link_text in clicked or link_text in {"HOME", "MENU", "MORE", 
-                            "CONTACT US", "GIFT CARDS", "SIGN IN", "ORDER NOW", "CHECKOUT"}:
+                    for cat_info in cat_elements[:40]:  # Cap at 40 categories
+                        cat_text = cat_info.get("text", "").strip()
+                        cat_upper = cat_text.upper()
+                        if cat_upper in clicked:
                             continue
-                        if "CATERING" in link_text or "PRIVACY" in link_text:
+                        if "CATERING" in cat_upper or "PRIVACY" in cat_upper:
                             continue
-                        clicked.add(link_text)
+                        clicked.add(cat_upper)
                         try:
-                            href = link_info["href"]
-                            # Click the link via JS to trigger lazy-load
-                            page.evaluate(f"""() => {{
-                                const el = document.querySelector('a[href="{href}"]');
-                                if (el) el.click();
-                            }}""")
-                            page.wait_for_timeout(1500)  # Wait for content to load
-                            # Scroll down a bit to trigger rendering
+                            selector = cat_info.get("selector")
+                            if selector:
+                                page.evaluate(f"""() => {{
+                                    const el = document.querySelector('{selector}');
+                                    if (el) el.click();
+                                }}""")
+                            else:
+                                # Click by matching text content
+                                escaped = cat_text.replace("'", "\\'").replace('"', '\\"')
+                                page.evaluate(f"""() => {{
+                                    // Find element by exact text match
+                                    const walker = document.createTreeWalker(
+                                        document.body, NodeFilter.SHOW_ELEMENT, null, false
+                                    );
+                                    let el = walker.nextNode();
+                                    while (el) {{
+                                        if (el.children.length === 0 || el.children.length === 1) {{
+                                            const t = el.innerText.trim();
+                                            if (t === "{escaped}") {{
+                                                el.click();
+                                                break;
+                                            }}
+                                        }}
+                                        el = walker.nextNode();
+                                    }}
+                                }}""")
+                            page.wait_for_timeout(2000)  # Wait for SPA to fetch + render
+                            # Scroll content area to trigger lazy rendering within category
                             page.evaluate("window.scrollBy(0, 400)")
                             page.wait_for_timeout(500)
                         except Exception:
@@ -695,9 +902,36 @@ def import_menu_from_url(
                     if scroll_pos >= curr:
                         break
 
-                # Extract all text content
+                # Extract text — try structured extraction first, then fall back to innerText
                 text = page.evaluate("""() => {
-                    document.querySelectorAll('script, style, noscript, svg').forEach(el => el.remove());
+                    // Remove non-content elements
+                    document.querySelectorAll('script, style, noscript, svg, nav, footer, header').forEach(el => el.remove());
+                    
+                    // Try to find menu item cards/containers for structured extraction
+                    const items = [];
+                    const cardSelectors = [
+                        '[class*="menu-item"]', '[class*="menuItem"]', '[class*="item-card"]',
+                        '[class*="product-card"]', '[class*="food-item"]', '[class*="dish"]',
+                        '[data-testid*="item"]', '[data-testid*="product"]',
+                        '.item', '.product', '.menu-card'
+                    ];
+                    
+                    for (const sel of cardSelectors) {
+                        const cards = document.querySelectorAll(sel);
+                        if (cards.length > 3) {
+                            cards.forEach(card => {
+                                const t = card.innerText.trim();
+                                if (t && t.length > 5) items.push(t);
+                            });
+                            break;
+                        }
+                    }
+                    
+                    if (items.length > 5) {
+                        return items.join('\n---\n');
+                    }
+                    
+                    // Fallback: plain innerText
                     return document.body.innerText;
                 }""")
                 browser.close()
@@ -886,7 +1120,8 @@ Website data:
             oai_data = _json.loads(oai_res.read())
             response_text = oai_data["choices"][0]["message"]["content"].strip()
             menu_data = _json.loads(response_text)
-        except Exception:
+        except Exception as e:
+            print(f"[AI] OpenAI extraction error: {e}")
             menu_data = None
 
     # Count total items extracted
@@ -973,8 +1208,8 @@ RULES:
                 if vision_items > total_items:
                     menu_data = vision_menu
                     total_items = vision_items
-        except Exception:
-            pass  # Screenshot approach failed, continue
+        except Exception as e:
+            print(f"[AI] Gemini Vision error: {e}")
 
         # --- 6B: Gemini text fallback (if still low items) ---
         if total_items < 10:
@@ -1004,8 +1239,8 @@ Website text content:
                 if text_items > total_items:
                     menu_data = text_menu
                     total_items = text_items
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[AI] Gemini text error: {e}")
 
     if not menu_data:
         return {"error": f"Could not extract menu from {pages_scraped} page(s). Try a direct menu page URL."}
