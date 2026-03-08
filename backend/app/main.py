@@ -28,6 +28,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Temp: Capture unhandled exceptions for Vercel debugging ---
+import traceback as _tb
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+@app.exception_handler(Exception)
+async def _debug_exception_handler(request: Request, exc: Exception):
+    tb_str = _tb.format_exc()[-500:]
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)[:300], "traceback": tb_str},
+    )
+
 
 @app.get("/health")
 async def health():
