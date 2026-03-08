@@ -323,7 +323,6 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
     if (!user || (user.role !== "owner" && user.role !== "admin")) {
         return (
             <div className="owner-portal">
-                <button className="owner-back-btn" onClick={onBack}>← Back to App</button>
                 <div className="owner-card owner-register">
                     <h2>🍽️ Restaurant Owner Portal</h2>
                     <p>Register as a restaurant owner to manage your menus and receive orders.</p>
@@ -341,9 +340,11 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
     return (
         <div className="owner-portal">
             <div className="owner-header">
-                <button className="owner-back-btn" onClick={onBack}>← Back to App</button>
                 <h2>🍽️ Owner Dashboard</h2>
-                <span className="owner-email">{user.email}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                    <span className="owner-email">{user.email}</span>
+                    <button className="owner-back-btn" onClick={onBack}>Logout</button>
+                </div>
             </div>
 
             {/* My Restaurants */}
