@@ -34,6 +34,20 @@ async def health():
     return {"status": "ok"}
 
 
+# Global exception handler for better error diagnostics on Vercel
+from fastapi.responses import JSONResponse
+import traceback
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    tb = traceback.format_exc()
+    print(f"[ERROR] {exc}\n{tb}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc), "type": type(exc).__name__},
+    )
+
+
 # --- Multi-restaurant cart helper ---
 def _build_cart_summary(db: Session, user_id: int) -> dict:
     """Build grouped cart data across all pending orders for a user."""
