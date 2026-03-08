@@ -108,7 +108,10 @@ export default function App() {
   const [isListening, setIsListening] = useState(false);
 
   // Owner Portal
-  const [showOwnerPortal, setShowOwnerPortal] = useState(false);
+  const [showOwnerPortal, setShowOwnerPortal] = useState(() => {
+    return localStorage.getItem("userRole") === "owner";
+  });
+  const [userRole, setUserRole] = useState(() => localStorage.getItem("userRole") || "customer");
 
   // Sticky category sidebar
   const [activeCategories, setActiveCategories] = useState([]);
@@ -466,13 +469,18 @@ export default function App() {
 
   const selectRestaurant = (r) => { setShowSuggestions(false); doSend(`#${r.slug}`); };
 
-  // --- Auth ---
   const handleAuth = async (e) => {
     e.preventDefault();
     setStatus("Signing in...");
     try {
       const res = mode === "login" ? await login({ email, password }) : await register({ email, password });
       setToken(res.access_token);
+      const role = res.role || "customer";
+      setUserRole(role);
+      localStorage.setItem("userRole", role);
+      if (role === "owner" || role === "admin") {
+        setShowOwnerPortal(true);
+      }
       setStatus("Ready.");
     } catch (err) { setStatus(err.message || "Auth failed."); }
   };
@@ -481,6 +489,8 @@ export default function App() {
     setToken(""); setSessionId(null); setMessages([welcomeMsg]);
     setCartData(null); setShowCartPanel(false); localStorage.removeItem("token");
     setActiveCategories([]); setActiveCategoryName(null);
+    setUserRole("customer"); localStorage.removeItem("userRole");
+    setShowOwnerPortal(false);
   };
 
   const renderContent = (text) => {
@@ -493,8 +503,19 @@ export default function App() {
     return (
       <OwnerPortal
         token={token}
-        onBack={() => setShowOwnerPortal(false)}
-        onTokenUpdate={(t) => { setToken(t); setShowOwnerPortal(true); }}
+        onBack={() => {
+          if (userRole === "owner") {
+            handleLogout();
+          } else {
+            setShowOwnerPortal(false);
+          }
+        }}
+        onTokenUpdate={(t) => {
+          setToken(t);
+          setUserRole("owner");
+          localStorage.setItem("userRole", "owner");
+          setShowOwnerPortal(true);
+        }}
       />
     );
   }
@@ -544,14 +565,6 @@ export default function App() {
           {!locating && locationLabel && <span className="location-label">{locationLabel}</span>}
         </div>
         <div className="location-right">
-          <button
-            className="location-btn"
-            onClick={() => setShowOwnerPortal(true)}
-            title="Restaurant Owner Portal"
-            style={{ background: "linear-gradient(135deg, #6366f1, #8b5cf6)", fontSize: "0.82rem" }}
-          >
-            🍽️ Owner
-          </button>
           <label className="radius-label">
             Within
             <select value={radius} onChange={(e) => handleRadiusChange(Number(e.target.value))}>

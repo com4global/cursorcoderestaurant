@@ -93,7 +93,7 @@ def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
     user = crud.create_user(db, payload.email, payload.password)
     token = create_access_token(user.email)
-    return {"access_token": token}
+    return {"access_token": token, "role": user.role}
 
 
 @app.post("/auth/login", response_model=schemas.Token)
@@ -102,7 +102,7 @@ def login(payload: schemas.LoginRequest, db: Session = Depends(get_db)):
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     token = create_access_token(user.email)
-    return {"access_token": token}
+    return {"access_token": token, "role": user.role}
 
 
 import math, urllib.request, urllib.parse, json as _json
@@ -270,7 +270,7 @@ def register_owner(payload: schemas.UserCreate, db: Session = Depends(get_db)):
             existing.role = "owner"
             db.commit()
         token = create_access_token(existing.email)
-        return {"access_token": token}
+        return {"access_token": token, "role": existing.role}
     # New user — register as owner
     user = models.User(
         email=payload.email,
@@ -281,7 +281,7 @@ def register_owner(payload: schemas.UserCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
     token = create_access_token(user.email)
-    return {"access_token": token}
+    return {"access_token": token, "role": user.role}
 
 
 # --- My restaurants ---
