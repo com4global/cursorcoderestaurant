@@ -62,3 +62,6 @@ outputs/
 Wav2Lip/
 *.pth
 *.ckpt
+
+# Local Netlify folder
+.netlify
