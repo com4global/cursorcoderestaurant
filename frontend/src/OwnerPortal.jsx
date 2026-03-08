@@ -53,7 +53,11 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
     const [notifSaving, setNotifSaving] = useState({});
 
     useEffect(() => {
-        if (token) loadProfile();
+        if (token) {
+            loadProfile();
+        } else {
+            setLoading(false);
+        }
     }, [token]);
 
     // --- Orders polling ---
