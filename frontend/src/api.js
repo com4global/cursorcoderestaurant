@@ -4,6 +4,11 @@ async function request(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, options);
   if (!response.ok) {
     const text = await response.text();
+    if (response.status === 401) {
+      const err = new Error("Session expired. Please log in again.");
+      err.status = 401;
+      throw err;
+    }
     throw new Error(text || "Request failed");
   }
   return response.json();

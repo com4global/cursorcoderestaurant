@@ -101,6 +101,112 @@ def _items_data(db, category_id):
 
 
 # ---------------------------------------------------------------------------
+# Smart restaurant matching from natural language
+# ---------------------------------------------------------------------------
+
+_RESTAURANT_INTENTS = [
+    r"(?:order|eat|food|ordering|get food|get something)\s+(?:from|at|in)\s+(.+)",
+    r"(?:i want to|i'd like to|let me|can i|could i)\s+(?:order|eat|get food|get something)\s+(?:from|at|in)\s+(.+)",
+    r"(?:go to|open|select|pick|choose|show me)\s+(.+)",
+    r"(?:take me to|switch to|change to)\s+(.+)",
+]
+
+
+def _extract_restaurant_name(text: str) -> str | None:
+    """Extract restaurant name from natural language input."""
+    lower = text.lower().strip()
+    for pattern in _RESTAURANT_INTENTS:
+        m = re.search(pattern, lower)
+        if m:
+            name = m.group(1).strip()
+            # Clean trailing intent words
+            for suffix in ["restaurant", "please", "menu", "and", "then"]:
+                name = re.sub(rf'\s+{suffix}$', '', name).strip()
+            if name:
+                return name
+    return None
+
+
+def _extract_item_after_restaurant(text: str) -> str | None:
+    """Extract item name from compound voice commands like 'order biryani from Desi District'."""
+    lower = text.lower().strip()
+    patterns = [
+        r"(?:order|get|add|i want|give me|i'd like)\s+(.+?)\s+(?:from|at|in)\s+",
+        r"(.+?)\s+(?:from|at|in)\s+",
+    ]
+    # Words that are pure intent words, not food items
+    _INTENT_WORDS = {"order", "food", "eat", "something", "stuff", "anything",
+                     "ordering", "get", "want", "like", "have", "need",
+                     "i", "to", "some", "a", "an", "the", "me", "please",
+                     "would", "could", "can", "let", "i'd", "i'll"}
+    for pattern in patterns:
+        m = re.search(pattern, lower)
+        if m:
+            item = m.group(1).strip()
+            for filler in ["some", "a", "an", "the", "me", "to", "i want", "i'd like",
+                           "please", "can i get", "can i have"]:
+                item = re.sub(rf'^{re.escape(filler)}\s*', '', item).strip()
+            if not item or len(item) <= 1:
+                continue
+            # If ALL remaining words are intent words, skip this match
+            words = set(item.split())
+            if words.issubset(_INTENT_WORDS):
+                continue
+            return item
+    return None
+
+
+def _find_best_restaurant(name: str, all_restaurants) -> object | None:
+    """Fuzzy match a restaurant name."""
+    name_lower = name.lower().strip()
+    if not name_lower:
+        return None
+
+    # Exact slug or name match
+    for r in all_restaurants:
+        if r.slug == name_lower or r.name.lower() == name_lower:
+            return r
+
+    # Partial match
+    for r in all_restaurants:
+        if name_lower in r.name.lower() or r.name.lower() in name_lower:
+            return r
+        slug_clean = r.slug.replace('-', ' ')
+        if name_lower in slug_clean or slug_clean in name_lower:
+            return r
+
+    # Fuzzy match
+    best, best_score = None, 0.0
+    for r in all_restaurants:
+        score = max(
+            _similarity(name_lower, r.name.lower()),
+            _similarity(name_lower, r.slug.replace('-', ' ')),
+        )
+        if score > best_score:
+            best_score = score
+            best = r
+    return best if best_score >= 0.5 else None
+
+
+def _search_items_across_restaurants(db: Session, query: str, restaurants, limit=5):
+    """Search for items across all restaurants."""
+    query_lower = query.lower().strip()
+    results = []  # (item, restaurant, score)
+    for rest in restaurants:
+        all_items = _get_all_restaurant_items(db, rest.id)
+        for item in all_items:
+            score = _similarity(query_lower, item.name.lower())
+            if query_lower in item.name.lower():
+                score = max(score, 0.8)
+            for word in item.name.lower().split():
+                score = max(score, _similarity(query_lower, word))
+            if score >= 0.4:
+                results.append((item, rest, score))
+    results.sort(key=lambda x: x[2], reverse=True)
+    return results[:limit]
+
+
+#
 # Fuzzy item matching
 # ---------------------------------------------------------------------------
 
@@ -242,9 +348,93 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
         cart = _build_cart_summary_chat(db, session.user_id)
         return _result(reply, restaurant_id=restaurant.id, categories=cats, cart_summary=cart)
 
-    # --- If no restaurant selected yet ---
+    # --- If no restaurant selected yet: try smart matching ---
     if session.restaurant_id is None:
-        return _result("Type # to pick a restaurant and start ordering!")
+        all_restaurants = crud.list_restaurants(db)
+
+        # Try to extract a restaurant name from natural language
+        extracted_name = _extract_restaurant_name(cleaned)
+        item_hint = _extract_item_after_restaurant(cleaned) if extracted_name else None
+
+        # If no pattern matched, try the raw text as a restaurant name
+        candidate = extracted_name or cleaned
+        restaurant = _find_best_restaurant(candidate, all_restaurants)
+
+        if restaurant:
+            existing_order = crud.get_user_order_for_restaurant(db, session.user_id, restaurant.id)
+            new_order_id = existing_order.id if existing_order else None
+            _set_session_state(db, session, restaurant_id=restaurant.id, category_id=None, order_id=new_order_id)
+            cats = _categories_data(db, restaurant.id)
+            cart = _build_cart_summary_chat(db, session.user_id)
+
+            # If compound command had an item hint, try to match it
+            if item_hint:
+                all_items = _get_all_restaurant_items(db, restaurant.id)
+                parsed_items = _parse_order_items(item_hint, all_items)
+                if parsed_items:
+                    order = crud.get_user_order_for_restaurant(db, session.user_id, restaurant.id)
+                    if not order:
+                        order = crud.create_order(db, session.user_id, restaurant.id)
+                    crud.attach_order_to_session(db, session, order)
+                    added = []
+                    for menu_item, qty in parsed_items:
+                        crud.add_order_item(db, order, menu_item, qty)
+                        added.append(f"  {qty}x {menu_item.name} - ${menu_item.price_cents * qty / 100:.2f}")
+                    crud.recompute_order_total(db, order)
+                    total = f"${order.total_cents / 100:.2f}"
+                    cart = _build_cart_summary_chat(db, session.user_id)
+                    reply = f"Welcome to {restaurant.name}!\n\nAdded to your order:\n" + "\n".join(added)
+                    reply += f"\n\nCart total: {total}"
+                    return _result(reply, restaurant_id=restaurant.id, order_id=order.id, categories=cats, cart_summary=cart)
+
+                # Try matching as category
+                categories = crud.list_categories(db, restaurant.id)
+                for cat in categories:
+                    if _similarity(item_hint.lower(), cat.name.lower()) >= 0.6:
+                        items = _items_data(db, cat.id)
+                        return _result(
+                            f"Welcome to {restaurant.name}!\n\n{cat.name} — {len(items)} items. Tap + to add or tell me what you want!",
+                            restaurant_id=restaurant.id, category_id=cat.id, order_id=new_order_id,
+                            categories=cats, items=items, cart_summary=cart,
+                        )
+
+                # Try fuzzy item search as fallback
+                matches = _find_matching_items(item_hint, all_items)
+                if matches:
+                    items_data = [
+                        {"id": m.id, "name": m.name, "description": m.description or "", "price_cents": m.price_cents}
+                        for m in matches
+                    ]
+                    return _result(
+                        f'Welcome to {restaurant.name}!\n\nFound {len(matches)} items matching "{item_hint}". Tap + to add!',
+                        restaurant_id=restaurant.id, order_id=new_order_id,
+                        categories=cats, items=items_data, cart_summary=cart,
+                    )
+
+            reply = f"Welcome to {restaurant.name}! Pick a category or just tell me what you want."
+            return _result(reply, restaurant_id=restaurant.id, categories=cats, cart_summary=cart)
+
+        # No restaurant match — try cross-restaurant item search
+        if all_restaurants and len(cleaned) > 2:
+            cross_results = _search_items_across_restaurants(db, cleaned, all_restaurants)
+            if cross_results:
+                lines = [f'Found "{cleaned}" at these restaurants:\n']
+                seen = set()
+                for item, rest, score in cross_results:
+                    if rest.id not in seen:
+                        lines.append(f"• **{rest.name}** — {item.name} (${item.price_cents/100:.2f})")
+                        seen.add(rest.id)
+                lines.append(f'\nSay the restaurant name or type #{cross_results[0][1].slug} to order!')
+                return _result("\n".join(lines))
+
+        # Final fallback
+        if all_restaurants:
+            suggestions = [f"• {r.name} — #{r.slug}" for r in all_restaurants[:5]]
+            return _result(
+                "I couldn't find that restaurant. Available options:\n\n" + "\n".join(suggestions)
+                + "\n\nSay a restaurant name or type # to browse!"
+            )
+        return _result("No restaurants available. Add your zipcode to find nearby options!")
 
     # --- Browse category by name or id ---
     if lower.startswith("category:") or lower.startswith("browse:"):
@@ -265,18 +455,79 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                 items=items,
             )
 
+    # --- Quick add by item ID (from tapping + button) ---
+    quick_add = re.match(r'^add:(\d+)(?::(\d+))?$', lower)
+    if quick_add:
+        item_id = int(quick_add.group(1))
+        quantity = int(quick_add.group(2) or 1)
+        all_items = _get_all_restaurant_items(db, session.restaurant_id)
+        menu_item = next((i for i in all_items if i.id == item_id), None)
+        if menu_item:
+            order = crud.get_user_order_for_restaurant(db, session.user_id, session.restaurant_id)
+            if not order:
+                order = crud.create_order(db, session.user_id, session.restaurant_id)
+            crud.attach_order_to_session(db, session, order)
+
+            order_item = crud.add_order_item(db, order, menu_item, quantity)
+            crud.recompute_order_total(db, order)
+            total = f"${order.total_cents / 100:.2f}"
+            qty_msg = f" Now {order_item.quantity}x in cart." if order_item.quantity > 1 else ""
+            cart = _build_cart_summary_chat(db, session.user_id)
+            return _result(
+                f"Added {quantity}x {menu_item.name}!{qty_msg} Cart total: {total}",
+                restaurant_id=session.restaurant_id,
+                order_id=order.id,
+                cart_summary=cart,
+            )
+        return _result("Item not found.", restaurant_id=session.restaurant_id)
+
     # Also match if user just types a category name
     categories = crud.list_categories(db, session.restaurant_id)
     cat_match = None
+
+    # Pass 1: Exact match
     for cat in categories:
         if cat.name.lower() == lower or str(cat.id) == lower:
             cat_match = cat
             break
+
+    # Pass 2: Partial substring match (user text in category name or vice versa)
     if not cat_match:
         for cat in categories:
-            if _similarity(lower, cat.name.lower()) >= 0.7:
-                cat_match = cat
+            cat_lower = cat.name.lower()
+            # Split category name by / and spaces for multi-word categories
+            cat_words = [w.strip() for w in cat_lower.replace("/", " ").split()]
+            input_words = lower.split()
+            # Check if any input word matches any category word closely
+            for iw in input_words:
+                for cw in cat_words:
+                    if len(iw) >= 3 and (iw in cw or cw in iw):
+                        cat_match = cat
+                        break
+                    if len(iw) >= 3 and _similarity(iw, cw) >= 0.75:
+                        cat_match = cat
+                        break
+                if cat_match:
+                    break
+            if cat_match:
                 break
+
+    # Pass 3: Fuzzy match on full name (lower threshold)
+    if not cat_match:
+        best_cat, best_score = None, 0.0
+        for cat in categories:
+            cat_lower = cat.name.lower()
+            score = _similarity(lower, cat_lower)
+            # Also check per-word similarity
+            for word in cat_lower.replace("/", " ").split():
+                word = word.strip()
+                if word:
+                    score = max(score, _similarity(lower, word))
+            if score > best_score:
+                best_score = score
+                best_cat = cat
+        if best_score >= 0.55:
+            cat_match = best_cat
 
     if cat_match:
         items = _items_data(db, cat_match.id)
@@ -353,31 +604,6 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                       order_id=session.order_id,
                       cart_summary=cart)
 
-    # --- Quick add by item ID (from tapping + button) ---
-    quick_add = re.match(r'^add:(\d+)(?::(\d+))?$', lower)
-    if quick_add:
-        item_id = int(quick_add.group(1))
-        quantity = int(quick_add.group(2) or 1)
-        all_items = _get_all_restaurant_items(db, session.restaurant_id)
-        menu_item = next((i for i in all_items if i.id == item_id), None)
-        if menu_item:
-            order = crud.get_user_order_for_restaurant(db, session.user_id, session.restaurant_id)
-            if not order:
-                order = crud.create_order(db, session.user_id, session.restaurant_id)
-            crud.attach_order_to_session(db, session, order)
-
-            order_item = crud.add_order_item(db, order, menu_item, quantity)
-            crud.recompute_order_total(db, order)
-            total = f"${order.total_cents / 100:.2f}"
-            qty_msg = f" Now {order_item.quantity}x in cart." if order_item.quantity > 1 else ""
-            cart = _build_cart_summary_chat(db, session.user_id)
-            return _result(
-                f"Added {quantity}x {menu_item.name}!{qty_msg} Cart total: {total}",
-                restaurant_id=session.restaurant_id,
-                order_id=order.id,
-                cart_summary=cart,
-            )
-        return _result("Item not found.", restaurant_id=session.restaurant_id)
 
     # --- Natural language ordering ---
     all_items = _get_all_restaurant_items(db, session.restaurant_id)

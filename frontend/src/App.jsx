@@ -403,9 +403,21 @@ export default function App() {
       if (res.cart_summary) {
         setCartData(res.cart_summary);
       }
+      // Always refresh cart from server after add commands
+      if (text.trim().startsWith("add:")) {
+        setTimeout(() => {
+          fetchCart(token).then(setCartData).catch(() => { });
+        }, 300);
+      }
       setStatus("Ready.");
     } catch (err) {
-      setStatus(err.message || "Failed.");
+      if (err.status === 401) {
+        localStorage.removeItem("token");
+        setToken(null);
+        setStatus("Session expired. Please log in again.");
+      } else {
+        setStatus(err.message || "Failed.");
+      }
     }
   };
 
@@ -661,7 +673,7 @@ export default function App() {
                 <p className="chat-status">{status}</p>
               </div>
               <div className="chat-header-right">
-                {cartData && cartData.grand_total_cents > 0 && (
+                {cartData && cartData.restaurants && cartData.restaurants.length > 0 && (
                   <div style={{ position: "relative" }}>
                     <button className="cart-btn" onClick={() => setShowCartPanel((v) => !v)}>
                       🛒 ${(cartData.grand_total_cents / 100).toFixed(2)}
@@ -708,12 +720,23 @@ export default function App() {
                                 setCheckoutDone(result);
                                 setCartData(null);
                                 setShowCartPanel(false);
-                                // Refresh cart
+                                // Refresh orders with small delay to ensure DB commit, then auto-open
+                                setTimeout(() => {
+                                  fetchMyOrders(token).then((orders) => {
+                                    setMyOrders(orders);
+                                    setShowOrderTracker(true); // Auto-open to show new order
+                                  }).catch(() => { });
+                                }, 500);
+                                // Refresh again at 2s and 5s for robustness
+                                setTimeout(() => {
+                                  fetchMyOrders(token).then(setMyOrders).catch(() => { });
+                                }, 2000);
                                 setTimeout(async () => {
                                   try {
                                     const c = await fetchCart(token);
                                     setCartData(c);
                                   } catch { }
+                                  fetchMyOrders(token).then(setMyOrders).catch(() => { });
                                   setCheckoutDone(null);
                                 }, 5000);
                               } catch (err) {
@@ -729,51 +752,54 @@ export default function App() {
                     )}
                   </div>
                 )}
+                {myOrders.length > 0 && (
+                  <div style={{ position: "relative" }}>
+                    <button className="orders-header-btn" onClick={() => setShowOrderTracker(!showOrderTracker)}>
+                      📦 Orders ({myOrders.filter(o => !['completed', 'rejected'].includes(o.status) || (Date.now() - new Date(o.created_at).getTime() < 3600000)).length})
+                    </button>
+                    {showOrderTracker && (
+                      <div className="orders-dropdown">
+                        <div className="orders-dropdown-header">
+                          <span>📦 My Orders</span>
+                          <button className="cart-panel-close" onClick={() => setShowOrderTracker(false)}>✕</button>
+                        </div>
+                        <div className="orders-dropdown-body">
+                          {myOrders.filter(o => !['completed', 'rejected'].includes(o.status) || (Date.now() - new Date(o.created_at).getTime() < 3600000)).slice(0, 5).map(order => {
+                            const steps = ['confirmed', 'accepted', 'preparing', 'ready', 'completed'];
+                            const isRejected = order.status === 'rejected';
+                            const currentStep = isRejected ? -1 : steps.indexOf(order.status);
+                            return (
+                              <div key={order.id} className={`order-tracker-card ${isRejected ? 'rejected' : ''}`}>
+                                <div className="order-tracker-restaurant">
+                                  <span>🍽️ {order.restaurant_name}</span>
+                                  <span className="order-tracker-total">${(order.total_cents / 100).toFixed(2)}</span>
+                                </div>
+                                <div className="order-tracker-items-summary">
+                                  {order.items.map((it, i) => `${it.quantity}x ${it.name}`).join(', ')}
+                                </div>
+                                {isRejected ? (
+                                  <div className="order-tracker-rejected">❌ Order Rejected</div>
+                                ) : (
+                                  <div className="order-tracker-steps">
+                                    {steps.map((s, i) => (
+                                      <div key={s} className={`order-step ${i <= currentStep ? 'active' : ''} ${i === currentStep ? 'current' : ''}`}>
+                                        <div className="order-step-dot" />
+                                        <span className="order-step-label">{s === 'confirmed' ? 'Ordered' : s.charAt(0).toUpperCase() + s.slice(1)}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
                 <button className="ghost" onClick={handleLogout}>Log out</button>
               </div>
             </div>
-
-            {/* Order Tracker — Collapsible toggle */}
-            {myOrders.length > 0 && (
-              <div className={`order-tracker-panel ${showOrderTracker ? 'expanded' : 'collapsed'}`}>
-                <div className="order-tracker-header" onClick={() => setShowOrderTracker(!showOrderTracker)}>
-                  <span>📦 My Orders ({myOrders.filter(o => !['completed', 'rejected'].includes(o.status) || (Date.now() - new Date(o.created_at).getTime() < 3600000)).length})</span>
-                  <button className="order-tracker-toggle">{showOrderTracker ? '▲' : '▼'}</button>
-                </div>
-                {showOrderTracker && (
-                  <div className="order-tracker-body">
-                    {myOrders.filter(o => !['completed', 'rejected'].includes(o.status) || (Date.now() - new Date(o.created_at).getTime() < 3600000)).slice(0, 5).map(order => {
-                      const steps = ['confirmed', 'accepted', 'preparing', 'ready', 'completed'];
-                      const isRejected = order.status === 'rejected';
-                      const currentStep = isRejected ? -1 : steps.indexOf(order.status);
-                      return (
-                        <div key={order.id} className={`order-tracker-card ${isRejected ? 'rejected' : ''}`}>
-                          <div className="order-tracker-restaurant">
-                            <span>🍽️ {order.restaurant_name}</span>
-                            <span className="order-tracker-total">${(order.total_cents / 100).toFixed(2)}</span>
-                          </div>
-                          <div className="order-tracker-items-summary">
-                            {order.items.map((it, i) => `${it.quantity}x ${it.name}`).join(', ')}
-                          </div>
-                          {isRejected ? (
-                            <div className="order-tracker-rejected">❌ Order Rejected</div>
-                          ) : (
-                            <div className="order-tracker-steps">
-                              {steps.map((s, i) => (
-                                <div key={s} className={`order-step ${i <= currentStep ? 'active' : ''} ${i === currentStep ? 'current' : ''}`}>
-                                  <div className="order-step-dot" />
-                                  <span className="order-step-label">{s === 'confirmed' ? 'Ordered' : s.charAt(0).toUpperCase() + s.slice(1)}</span>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
 
             <div className="chat-body-row">
               <div className="chat-window">
@@ -879,10 +905,16 @@ export default function App() {
             </div>
 
             <div className="chat-input-wrapper">
+              {isListening && (
+                <div className="voice-indicator">
+                  <div className="voice-wave"><span></span><span></span><span></span><span></span><span></span></div>
+                  <span>Listening... speak a restaurant name, item, or order</span>
+                </div>
+              )}
               <form className="chat-input" onSubmit={handleSend}>
                 <div className="input-container">
                   <input ref={inputRef} value={messageText} onChange={handleInputChange}
-                    onKeyDown={handleKeyDown} placeholder='Type # for restaurants, or say what you want...' />
+                    onKeyDown={handleKeyDown} placeholder={isListening ? 'Listening...' : 'Type # for restaurants, or say what you want...'} />
                   {showSuggestions && (
                     <div className="suggestions">
                       {filteredRestaurants.map((r, i) => (
@@ -913,7 +945,7 @@ export default function App() {
                   )}
                 </div>
                 <button type="button" className={`mic-btn ${isListening ? "listening" : ""}`}
-                  onClick={startListening} title="Voice input">
+                  onClick={startListening} title="Voice input — say a restaurant name or what you want to order">
                   {isListening ? "🔴" : "🎤"}
                 </button>
                 <button type="submit">Send</button>
