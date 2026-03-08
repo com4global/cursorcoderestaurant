@@ -292,6 +292,19 @@ def owner_restaurants(db: Session = Depends(get_db), current_user=Depends(get_cu
     return db.query(models.Restaurant).filter(models.Restaurant.owner_id == current_user.id).all()
 
 
+@app.post("/owner/claim-all")
+def claim_all_restaurants(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """Admin/owner: assign ALL restaurants to the current user."""
+    if current_user.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    restaurants = db.query(models.Restaurant).all()
+    count = 0
+    for r in restaurants:
+        r.owner_id = current_user.id
+        count += 1
+    db.commit()
+    return {"claimed": count, "user_id": current_user.id}
+
 @app.post("/owner/restaurants", response_model=schemas.RestaurantOut)
 def create_restaurant(payload: schemas.RestaurantCreate, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     if current_user.role not in ("owner", "admin"):
