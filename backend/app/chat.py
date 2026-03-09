@@ -7,6 +7,7 @@ Returns dicts with:
   - categories: list of category dicts (for interactive chips)
   - items: list of item dicts (for interactive cards)
 """
+from __future__ import annotations
 
 import re
 from datetime import datetime
