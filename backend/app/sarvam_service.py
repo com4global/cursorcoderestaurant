@@ -133,10 +133,12 @@ def chat_completion(
     Returns the assistant's reply text.
     """
     messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
+    # Sarvam requires exactly one system message at the start
+    combined_system = system_prompt
     if context:
-        messages.append({"role": "system", "content": context})
+        combined_system += f"\n\nCurrent context: {context}"
+    if combined_system:
+        messages.append({"role": "system", "content": combined_system})
     messages.append({"role": "user", "content": user_message})
 
     payload = {
@@ -163,9 +165,9 @@ def chat_completion(
             choices = data.get("choices", [])
             if choices:
                 content = choices[0].get("message", {}).get("content", "")
-                # Strip <think>...</think> tags if present
+                # Strip <think> and </think> tags (Sarvam prefixes responses with <think>)
                 import re
-                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+                content = re.sub(r"</?think>", "", content).strip()
                 return content
             return ""
     except urllib.error.HTTPError as e:
