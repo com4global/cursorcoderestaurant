@@ -60,3 +60,35 @@ async def text_to_speech(req: TTSRequest):
         return result
     except RuntimeError as e:
         raise HTTPException(502, str(e))
+
+
+# ---------- Chat Agent ----------
+
+class ChatRequest(BaseModel):
+    message: str
+    context: str = ""
+
+
+@router.post("/chat")
+async def voice_chat(req: ChatRequest):
+    """Get intelligent response from Sarvam AI agent."""
+    if not req.message.strip():
+        raise HTTPException(400, "Message cannot be empty")
+
+    system_prompt = (
+        "You are a friendly restaurant ordering assistant. "
+        "Help users browse restaurants, choose categories, select menu items, and place orders. "
+        "Keep responses short (under 50 words), natural, and conversational. "
+        "If the user mentions a food item or category, help them find it. "
+        "Respond in the same language the user speaks."
+    )
+
+    try:
+        reply = sarvam_service.chat_completion(
+            user_message=req.message,
+            system_prompt=system_prompt,
+            context=req.context,
+        )
+        return {"reply": reply}
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))

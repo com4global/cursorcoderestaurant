@@ -178,3 +178,17 @@ export async function voiceTTS(text, language = "en-IN", speaker = "kavya") {
   }
   return resp.json(); // { audio_base64, format }
 }
+
+export async function voiceChat(message, context = "") {
+  const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+  const resp = await fetch(`${API}/api/voice/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, context }),
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(text || "Chat failed");
+  }
+  return resp.json(); // { reply }
+}

@@ -121,3 +121,55 @@ def generate_speech(
         raise RuntimeError(f"Sarvam TTS error ({e.code}): {error_body}")
     except Exception as e:
         raise RuntimeError(f"Sarvam TTS error: {str(e)}")
+
+
+def chat_completion(
+    user_message: str,
+    system_prompt: str = "",
+    context: str = "",
+) -> str:
+    """
+    Send a message to Sarvam chat completion API (sarvam-m model).
+    Returns the assistant's reply text.
+    """
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    if context:
+        messages.append({"role": "system", "content": context})
+    messages.append({"role": "user", "content": user_message})
+
+    payload = {
+        "model": "sarvam-m",
+        "messages": messages,
+        "max_tokens": 200,
+        "temperature": 0.7,
+    }
+
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        f"{SARVAM_BASE}/v1/chat/completions",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "api-subscription-key": SARVAM_API_KEY,
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+            choices = data.get("choices", [])
+            if choices:
+                content = choices[0].get("message", {}).get("content", "")
+                # Strip <think>...</think> tags if present
+                import re
+                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+                return content
+            return ""
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode() if e.fp else str(e)
+        raise RuntimeError(f"Sarvam chat error ({e.code}): {error_body}")
+    except Exception as e:
+        raise RuntimeError(f"Sarvam chat error: {str(e)}")

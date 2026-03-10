@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, checkout, fetchMyOrders, voiceSTT, voiceTTS } from "./api.js";
+import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
 
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
@@ -422,7 +422,7 @@ export default function App() {
       setVoiceState("listening");
       setVoiceTranscript("");
 
-      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm' });
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
@@ -434,7 +434,7 @@ export default function App() {
         stream.getTracks().forEach(t => t.stop());
         setIsListening(false);
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        if (audioBlob.size < 500) {
+        if (audioBlob.size < 100) {
           // Too short, re-listen
           if (voiceModeRef.current) setTimeout(() => voiceStartListening(), 500);
           else setVoiceState("idle");
@@ -461,12 +461,12 @@ export default function App() {
         }
       };
 
-      mediaRecorder.start();
+      mediaRecorder.start(250); // collect data every 250ms for reliability
 
-      // Auto-stop after 8 seconds max, or detect silence
+      // Auto-stop after 15 seconds max, or detect silence
       const silenceTimeout = setTimeout(() => {
         if (mediaRecorder.state === "recording") mediaRecorder.stop();
-      }, 8000);
+      }, 15000);
 
       // Silence detection using AudioContext
       try {
@@ -489,8 +489,8 @@ export default function App() {
             silenceStart = null;
           } else if (hasSound) {
             if (!silenceStart) silenceStart = Date.now();
-            else if (Date.now() - silenceStart > 1500) {
-              // 1.5s silence after speech = stop
+            else if (Date.now() - silenceStart > 2500) {
+              // 2.5s silence after speech = stop
               clearTimeout(silenceTimeout);
               if (mediaRecorder.state === "recording") mediaRecorder.stop();
               audioCtx.close();
@@ -564,24 +564,36 @@ export default function App() {
         setTimeout(() => { fetchCart(token).then(setCartData).catch(() => { }); }, 300);
       }
 
-      // Voice mode: speak SHORT confirmation, then auto-listen
+      // Voice mode: speak intelligent reply from Sarvam AI agent
       if (fromVoice && voiceModeRef.current) {
         let voiceReply = "";
-        if (res.items && res.items.length > 0) {
-          voiceReply = `${res.items.length} items. Pick one to add.`;
-        } else if (res.categories && res.categories.length > 0) {
-          voiceReply = "Categories loaded. Say a category.";
-        } else if (res.reply.toLowerCase().includes("added")) {
-          voiceReply = "Added! Anything else?";
-        } else if (res.reply.toLowerCase().includes("submitted") || res.reply.toLowerCase().includes("placed")) {
-          voiceReply = "Order placed!";
-          // Exit voice mode after order
+        if (res.reply.toLowerCase().includes("submitted") || res.reply.toLowerCase().includes("placed")) {
+          voiceReply = "Order placed! Thank you!";
           setTimeout(() => {
             voiceModeRef.current = false;
             setVoiceMode(false); setVoiceState("idle");
           }, 2000);
         } else {
-          voiceReply = "Got it. What next?";
+          // Use Sarvam AI chat agent for intelligent voice response
+          try {
+            const context = `Restaurant: ${selectedRestaurant?.name || 'not selected'}. ` +
+              `Categories: ${activeCategories?.map(c => c.name).join(', ') || 'none'}. ` +
+              `Items shown: ${currentItems?.length || 0}. ` +
+              `Chat reply was: ${res.reply}`;
+            const chatRes = await voiceChat(text.trim(), context);
+            voiceReply = chatRes.reply || res.reply;
+          } catch {
+            // Fallback to short replies if chat fails
+            if (res.items && res.items.length > 0) {
+              voiceReply = `${res.items.length} items found. Which one would you like?`;
+            } else if (res.categories && res.categories.length > 0) {
+              voiceReply = "Categories loaded. Which category?";
+            } else if (res.reply.toLowerCase().includes("added")) {
+              voiceReply = "Added! Anything else?";
+            } else {
+              voiceReply = "Got it. What next?";
+            }
+          }
         }
         voiceSpeak(voiceReply, !res.reply.toLowerCase().includes("submitted"));
       }
