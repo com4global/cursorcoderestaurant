@@ -243,6 +243,7 @@ def send_message(
         categories=result.get("categories"),
         items=result.get("items"),
         cart_summary=result.get("cart_summary"),
+        voice_prompt=result.get("voice_prompt"),
     )
 
 

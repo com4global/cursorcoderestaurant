@@ -181,8 +181,14 @@ export default function App() {
   const [myOrders, setMyOrders] = useState([]);
   const [ordersTab, setOrdersTab] = useState("current");
 
-  // Voice
+  // Voice Conversation Mode
+  const [voiceMode, setVoiceMode] = useState(false);
+  const [voiceState, setVoiceState] = useState("idle"); // idle | speaking | listening | processing
+  const [voiceTranscript, setVoiceTranscript] = useState("");
   const [isListening, setIsListening] = useState(false);
+  const voiceRecRef = useRef(null);
+  const voiceModeRef = useRef(false);
+  const lastVoicePromptRef = useRef(null);
 
   // Owner
   const [showOwnerPortal, setShowOwnerPortal] = useState(() => localStorage.getItem("userRole") === "owner");
@@ -361,27 +367,135 @@ export default function App() {
     if (userLat != null && userLng != null) await fetchRestaurantsData(userLat, userLng, newRadius);
   };
 
-  // ===================== VOICE =====================
+  // ===================== VOICE CONVERSATION MODE =====================
 
-  const startListening = () => {
+  // Speak text via TTS, then auto-listen when done
+  const voiceSpeak = useCallback((text, autoListenAfter = true) => {
+    if (!text) return;
+    window.speechSynthesis.cancel();
+    setVoiceState("speaking");
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "en-US";
+    utterance.rate = 1.05;
+    utterance.pitch = 1.0;
+    // Try to use a natural-sounding voice
+    const voices = window.speechSynthesis.getVoices();
+    const preferred = voices.find(v => v.name.includes("Samantha") || v.name.includes("Google") || v.name.includes("Natural"));
+    if (preferred) utterance.voice = preferred;
+    utterance.onend = () => {
+      if (autoListenAfter && voiceModeRef.current) {
+        voiceStartListening();
+      } else {
+        setVoiceState("idle");
+      }
+    };
+    utterance.onerror = () => {
+      if (autoListenAfter && voiceModeRef.current) {
+        voiceStartListening();
+      } else {
+        setVoiceState("idle");
+      }
+    };
+    window.speechSynthesis.speak(utterance);
+  }, []);
+
+  // Start listening for speech
+  const voiceStartListening = useCallback(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { alert("Voice not supported. Use Chrome."); return; }
+    if (voiceRecRef.current) { try { voiceRecRef.current.abort(); } catch { } }
     const rec = new SR();
-    rec.lang = "en-US"; rec.continuous = false; rec.interimResults = false;
-    rec.onstart = () => setIsListening(true);
-    rec.onresult = (e) => {
-      const text = e.results[0][0].transcript;
-      setMessageText(text); setIsListening(false);
-      setTimeout(() => doSend(text), 200);
+    rec.lang = "en-US";
+    rec.continuous = false;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+    voiceRecRef.current = rec;
+    rec.onstart = () => {
+      setIsListening(true);
+      setVoiceState("listening");
+      setVoiceTranscript("");
     };
-    rec.onerror = () => setIsListening(false);
-    rec.onend = () => setIsListening(false);
+    rec.onresult = (e) => {
+      let finalText = "";
+      let interimText = "";
+      for (let i = 0; i < e.results.length; i++) {
+        if (e.results[i].isFinal) {
+          finalText += e.results[i][0].transcript;
+        } else {
+          interimText += e.results[i][0].transcript;
+        }
+      }
+      setVoiceTranscript(finalText || interimText);
+      if (finalText) {
+        setIsListening(false);
+        setVoiceState("processing");
+        doSend(finalText, true);
+      }
+    };
+    rec.onerror = (e) => {
+      setIsListening(false);
+      // If the error is 'no-speech', try listening again
+      if (e.error === 'no-speech' && voiceModeRef.current) {
+        setTimeout(() => {
+          if (voiceModeRef.current) voiceStartListening();
+        }, 300);
+      } else {
+        setVoiceState("idle");
+      }
+    };
+    rec.onend = () => {
+      setIsListening(false);
+      // If voice mode is still on and we didn't get a result, re-listen
+      if (voiceModeRef.current && voiceState === "listening") {
+        setTimeout(() => {
+          if (voiceModeRef.current) voiceStartListening();
+        }, 300);
+      }
+    };
     rec.start();
+  }, [voiceState]);
+
+  // Toggle Voice Conversation Mode on/off
+  const toggleVoiceMode = useCallback(() => {
+    if (voiceMode) {
+      // Turn OFF
+      voiceModeRef.current = false;
+      setVoiceMode(false);
+      setVoiceState("idle");
+      setVoiceTranscript("");
+      setIsListening(false);
+      window.speechSynthesis.cancel();
+      if (voiceRecRef.current) { try { voiceRecRef.current.abort(); } catch { } }
+    } else {
+      // Turn ON
+      voiceModeRef.current = true;
+      setVoiceMode(true);
+      // Determine initial prompt based on state
+      let initialPrompt;
+      if (!selectedRestaurant) {
+        initialPrompt = "Which restaurant would you like to order from?";
+      } else if (activeCategories.length > 0 && currentItems.length === 0) {
+        const catNames = activeCategories.slice(0, 5).map(c => c.name).join(", ");
+        initialPrompt = `You're at ${selectedRestaurant.name}. Categories are: ${catNames}. Which one would you like?`;
+      } else if (currentItems.length > 0) {
+        initialPrompt = "What item would you like to add? Say the item name.";
+      } else if (lastVoicePromptRef.current) {
+        initialPrompt = lastVoicePromptRef.current;
+      } else {
+        initialPrompt = "Hi! What would you like to order?";
+      }
+      voiceSpeak(initialPrompt, true);
+    }
+  }, [voiceMode, selectedRestaurant, activeCategories, currentItems, voiceSpeak]);
+
+  // Legacy: simple one-shot mic for non-voice-mode
+  const startListening = () => {
+    toggleVoiceMode();
   };
 
   // ===================== CHAT / SEND =====================
 
-  const doSend = async (text) => {
+  const doSend = async (text, fromVoice = false) => {
     if (!text.trim()) return;
     setMessages((p) => [...p, { role: "user", content: text.trim() }]);
     setMessageText(""); setShowSuggestions(false); setStatus("Thinking...");
@@ -410,12 +524,33 @@ export default function App() {
       if (text.trim().startsWith("add:")) {
         setTimeout(() => { fetchCart(token).then(setCartData).catch(() => { }); }, 300);
       }
+
+      // Voice Conversation Mode: speak the voice_prompt and continue loop
+      if (res.voice_prompt) lastVoicePromptRef.current = res.voice_prompt;
+      if (fromVoice && voiceModeRef.current && res.voice_prompt) {
+        // Check for exit phrases
+        const exitPhrases = ["thank you", "order has been placed", "order has been sent"];
+        const shouldExit = exitPhrases.some(p => res.voice_prompt.toLowerCase().includes(p));
+        voiceSpeak(res.voice_prompt, !shouldExit);
+        if (shouldExit) {
+          setTimeout(() => {
+            voiceModeRef.current = false;
+            setVoiceMode(false);
+            setVoiceState("idle");
+          }, 3000);
+        }
+      }
+
       setStatus("Ready.");
     } catch (err) {
       if (err.status === 401) {
         localStorage.removeItem("token"); setToken(null);
         setStatus("Session expired. Please log in again.");
       } else { setStatus(err.message || "Failed."); }
+      // If in voice mode, inform and re-listen
+      if (fromVoice && voiceModeRef.current) {
+        voiceSpeak("Something went wrong. Please try again.", true);
+      }
     }
   };
 
@@ -772,8 +907,30 @@ export default function App() {
                     ) : null;
                   })()}
 
-                  {/* Voice indicator */}
-                  {isListening && (
+                  {/* Voice Conversation Mode UI */}
+                  {voiceMode && (
+                    <div className="voice-conversation-panel">
+                      <div className={`voice-orb ${voiceState}`}>
+                        <div className="voice-orb-ring" />
+                        <div className="voice-orb-ring delay" />
+                        <div className="voice-orb-icon">
+                          {voiceState === "speaking" ? "🔊" : voiceState === "listening" ? "🎙️" : voiceState === "processing" ? "⏳" : "🎤"}
+                        </div>
+                      </div>
+                      <div className="voice-state-label">
+                        {voiceState === "speaking" ? "Speaking..." : voiceState === "listening" ? "Listening..." : voiceState === "processing" ? "Processing..." : "Voice Mode"}
+                      </div>
+                      {voiceTranscript && (
+                        <div className="voice-transcript">
+                          <span className="voice-transcript-label">You said:</span> {voiceTranscript}
+                        </div>
+                      )}
+                      <button className="voice-stop-btn" onClick={toggleVoiceMode}>✕ End Voice Chat</button>
+                    </div>
+                  )}
+
+                  {/* Voice indicator (legacy fallback) */}
+                  {isListening && !voiceMode && (
                     <div className="voice-indicator">
                       <div className="voice-wave"><span></span><span></span><span></span><span></span><span></span></div>
                       <span>Listening...</span>
@@ -784,9 +941,10 @@ export default function App() {
                   <form onSubmit={handleSend} className="ai-chat-input-row" style={{ position: 'relative' }}>
                     <input ref={inputRef} className="ai-chat-input" value={messageText}
                       onChange={handleInputChange} onKeyDown={handleKeyDown}
-                      placeholder={isListening ? "Listening..." : "Type # for restaurants, or ask anything..."} />
-                    <button type="button" className={`mic-btn ${isListening ? "listening" : ""}`} onClick={startListening}>
-                      {isListening ? "🔴" : "🎤"}
+                      placeholder={voiceMode ? "Voice mode active — speak or type..." : isListening ? "Listening..." : "Type # for restaurants, or ask anything..."} />
+                    <button type="button" className={`mic-btn ${voiceMode ? "voice-active" : ""} ${isListening ? "listening" : ""}`} onClick={toggleVoiceMode}
+                      title={voiceMode ? "End voice conversation" : "Start voice conversation"}>
+                      {voiceMode ? "🔴" : "🎤"}
                     </button>
                     <button type="submit" className="send-btn">➤</button>
                     {/* Restaurant suggestions */}
@@ -798,12 +956,11 @@ export default function App() {
                             onMouseDown={(e) => { e.preventDefault(); selectRestaurant(r); }}
                             onMouseEnter={() => setSelectedIndex(i)}>
                             <div>
-                              <span className="suggestion-name">{r.name}</span>
-                              {r.distance_miles != null && <span className="suggestion-distance"> · {r.distance_miles} mi</span>}
-                              {r.cuisine && <span className="cuisine-tag" style={{ marginLeft: 6 }}>{r.cuisine}</span>}
-                            </div>
-                            <div>
-                              {r.partnered ? <span className="partner-badge">🟢 Order</span> : <span className="suggestion-slug">#{r.slug}</span>}
+                              <div className="suggestion-name">
+                                {r.partnered && <span className="suggestion-badge">✓</span>}
+                                {r.name}
+                              </div>
+                              {r.city && <div className="suggestion-meta">{r.city}{r.distance_miles != null ? ` · ${r.distance_miles} mi` : ''}</div>}
                             </div>
                           </div>
                         ))}

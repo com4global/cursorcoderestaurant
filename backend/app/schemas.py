@@ -142,6 +142,7 @@ class ChatMessageOut(BaseModel):
     categories: list[dict] | None = None
     items: list[dict] | None = None
     cart_summary: dict | None = None
+    voice_prompt: str | None = None
 
 
 # --- Cart schemas ---
