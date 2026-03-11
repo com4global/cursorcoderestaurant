@@ -181,3 +181,21 @@ class OrderOut(BaseModel):
     items: list[OrderItemOut]
     restaurant_name: str | None = None
     restaurant_id: int | None = None
+
+
+# --- Payment schemas ---
+
+class SubscriptionOut(BaseModel):
+    id: int
+    plan: str
+    status: str
+    trial_end: str | None = None
+    current_period_end: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class CheckoutSessionOut(BaseModel):
+    checkout_url: str
+    session_id: str
+

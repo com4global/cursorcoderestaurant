@@ -8,11 +8,11 @@ import urllib.parse
 
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
-from . import chat, crud, models, schemas
+from . import chat, crud, models, payments, schemas
 from .auth import create_access_token, get_current_user, verify_password
 from .config import settings
 from .db import get_db, engine
@@ -442,6 +442,9 @@ def owner_orders(
     restaurant_id: int,
     status: str | None = None,
     exclude_status: str | None = "completed,rejected",
+    search: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -456,6 +459,7 @@ def owner_orders(
         excluded = [s.strip() for s in exclude_status.split(",") if s.strip()]
         if excluded:
             q = q.filter(~models.Order.status.in_(excluded))
+    q = _apply_order_filters(q, db, search, date_from, date_to)
     orders = q.order_by(models.Order.created_at.desc()).limit(50).all()
     return _serialize_orders(db, orders)
 
@@ -465,6 +469,9 @@ def owner_orders_archived(
     restaurant_id: int,
     page: int = 1,
     per_page: int = 20,
+    search: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -476,6 +483,7 @@ def owner_orders_archived(
         models.Order.restaurant_id == restaurant_id,
         models.Order.status.in_(["completed", "rejected"]),
     )
+    q = _apply_order_filters(q, db, search, date_from, date_to)
     total = q.count()
     orders = q.order_by(models.Order.created_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
     return {
@@ -485,6 +493,57 @@ def owner_orders_archived(
         "per_page": per_page,
         "total_pages": (total + per_page - 1) // per_page if per_page else 1,
     }
+
+
+def _apply_order_filters(q, db, search, date_from, date_to):
+    """Apply search and date filters to an orders query."""
+    from datetime import datetime, timedelta
+    # Date filters
+    if date_from:
+        try:
+            d = datetime.strptime(date_from, "%Y-%m-%d")
+            q = q.filter(models.Order.created_at >= d)
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            d = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)
+            q = q.filter(models.Order.created_at < d)
+        except ValueError:
+            pass
+    # Search filter: order ID, customer email, or item names
+    if search and search.strip():
+        s = search.strip().lower()
+        # Try order ID match
+        try:
+            order_id = int(s.replace("#", ""))
+            q = q.filter(models.Order.id == order_id)
+        except ValueError:
+            # Search by customer email or item names
+            # Get user IDs matching search
+            matching_users = db.query(models.User.id).filter(
+                models.User.email.ilike(f"%{s}%")
+            ).all()
+            user_ids = [u.id for u in matching_users]
+            # Get order IDs with matching item names
+            matching_orders = db.query(models.OrderItem.order_id).join(
+                models.MenuItem, models.OrderItem.menu_item_id == models.MenuItem.id
+            ).filter(
+                models.MenuItem.name.ilike(f"%{s}%")
+            ).distinct().all()
+            order_ids = [o.order_id for o in matching_orders]
+            from sqlalchemy import or_
+            conditions = []
+            if user_ids:
+                conditions.append(models.Order.user_id.in_(user_ids))
+            if order_ids:
+                conditions.append(models.Order.id.in_(order_ids))
+            if conditions:
+                q = q.filter(or_(*conditions))
+            else:
+                # No matches — return empty
+                q = q.filter(models.Order.id == -1)
+    return q
 
 
 def _serialize_orders(db, orders):
@@ -525,6 +584,129 @@ def _serialize_orders(db, orders):
             "items": items,
         })
     return results
+
+# --- Owner: Sales Analytics ---
+@app.get("/owner/restaurants/{restaurant_id}/analytics")
+def owner_analytics(
+    restaurant_id: int,
+    period: str = "month",  # week, month, year, custom
+    date_from: str | None = None,
+    date_to: str | None = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Sales analytics for a restaurant."""
+    from datetime import datetime, timedelta
+    from sqlalchemy import func, desc
+
+    r = db.query(models.Restaurant).filter(
+        models.Restaurant.id == restaurant_id,
+        models.Restaurant.owner_id == current_user.id,
+    ).first()
+    if not r:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+
+    # Determine date range
+    now = datetime.utcnow()
+    if period == "week":
+        start = now - timedelta(days=7)
+        end = now
+    elif period == "month":
+        start = now - timedelta(days=30)
+        end = now
+    elif period == "year":
+        start = now - timedelta(days=365)
+        end = now
+    elif period == "custom" and date_from:
+        try:
+            start = datetime.strptime(date_from, "%Y-%m-%d")
+        except ValueError:
+            start = now - timedelta(days=30)
+        try:
+            end = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1) if date_to else now
+        except ValueError:
+            end = now
+    else:
+        start = now - timedelta(days=30)
+        end = now
+
+    # Only completed orders count as sales
+    base_q = db.query(models.Order).filter(
+        models.Order.restaurant_id == restaurant_id,
+        models.Order.status == "completed",
+        models.Order.created_at >= start,
+        models.Order.created_at < end,
+    )
+
+    # Summary stats
+    orders = base_q.all()
+    total_revenue = sum(o.total_cents for o in orders)
+    order_count = len(orders)
+    avg_order = total_revenue // order_count if order_count else 0
+
+    # Daily revenue for chart
+    daily = {}
+    for o in orders:
+        day = o.created_at.strftime("%Y-%m-%d")
+        if day not in daily:
+            daily[day] = {"date": day, "revenue": 0, "orders": 0}
+        daily[day]["revenue"] += o.total_cents
+        daily[day]["orders"] += 1
+
+    # Fill in missing days with zero
+    day_cursor = start
+    while day_cursor < end:
+        day_str = day_cursor.strftime("%Y-%m-%d")
+        if day_str not in daily:
+            daily[day_str] = {"date": day_str, "revenue": 0, "orders": 0}
+        day_cursor += timedelta(days=1)
+
+    daily_revenue = sorted(daily.values(), key=lambda x: x["date"])
+
+    # Top selling items
+    item_sales = {}
+    for o in orders:
+        for oi in o.items:
+            mid = oi.menu_item_id
+            if mid not in item_sales:
+                item_sales[mid] = {"menu_item_id": mid, "quantity": 0, "revenue": 0}
+            item_sales[mid]["quantity"] += oi.quantity
+            item_sales[mid]["revenue"] += oi.price_cents * oi.quantity
+
+    # Get menu item names
+    item_ids = list(item_sales.keys())
+    mi_names = {}
+    if item_ids:
+        for mi in db.query(models.MenuItem).filter(models.MenuItem.id.in_(item_ids)).all():
+            mi_names[mi.id] = mi.name
+
+    top_items = sorted(item_sales.values(), key=lambda x: x["quantity"], reverse=True)[:10]
+    for t in top_items:
+        t["name"] = mi_names.get(t["menu_item_id"], "Unknown")
+
+    # Orders by status (all statuses in the time range)
+    all_orders_in_range = db.query(models.Order).filter(
+        models.Order.restaurant_id == restaurant_id,
+        models.Order.created_at >= start,
+        models.Order.created_at < end,
+    ).all()
+    status_counts = {}
+    for o in all_orders_in_range:
+        status_counts[o.status] = status_counts.get(o.status, 0) + 1
+
+    return {
+        "period": period,
+        "date_from": start.strftime("%Y-%m-%d"),
+        "date_to": end.strftime("%Y-%m-%d"),
+        "summary": {
+            "total_revenue_cents": total_revenue,
+            "order_count": order_count,
+            "avg_order_cents": avg_order,
+        },
+        "daily_revenue": daily_revenue,
+        "top_items": top_items,
+        "orders_by_status": status_counts,
+    }
 
 
 # --- Owner: Update order status ---
@@ -772,6 +954,110 @@ def checkout(db: Session = Depends(get_db), current_user=Depends(get_current_use
                 print(f"[Notification] Failed for order {order.id}: {e}")
 
     return {"ok": True, "orders": confirmed, "count": len(confirmed)}
+
+
+# =============================================================
+# Payment Integration (Stripe)
+# =============================================================
+
+# --- Owner: Start Free Trial ---
+@app.post("/owner/start-trial")
+def owner_start_trial(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Start a 30-day free trial for a restaurant owner."""
+    if current_user.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Not a restaurant owner")
+    sub = payments.start_free_trial(db, current_user)
+    return {
+        "ok": True,
+        "plan": sub.plan,
+        "status": sub.status,
+        "trial_end": sub.trial_end.isoformat() if sub.trial_end else None,
+    }
+
+
+# --- Owner: Subscribe to a plan ---
+@app.post("/owner/subscribe")
+def owner_subscribe(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Create a Stripe Checkout Session for owner subscription."""
+    if current_user.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Not a restaurant owner")
+    plan = payload.get("plan", "standard")
+    result = payments.create_subscription_checkout(db, current_user, plan)
+    return result
+
+
+# --- Owner: Get subscription status ---
+@app.get("/owner/subscription")
+def owner_subscription_status(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Get the current owner's subscription status. Auto-expires trials past 30 days."""
+    sub = payments.get_subscription(db, current_user.id)
+    if not sub:
+        return {"plan": None, "status": "none", "active": False}
+    # Auto-expire trial if past due
+    sub = payments.check_and_expire_trial(db, sub)
+    days_remaining = payments.get_trial_days_remaining(sub)
+    return {
+        "id": sub.id,
+        "plan": sub.plan,
+        "status": sub.status,
+        "active": payments.is_subscription_active(sub),
+        "trial_end": sub.trial_end.isoformat() if sub.trial_end else None,
+        "trial_expired": sub.status == "expired",
+        "days_remaining": days_remaining,
+        "current_period_end": sub.current_period_end.isoformat() if sub.current_period_end else None,
+    }
+
+
+# --- Owner: Manage billing (Stripe Customer Portal) ---
+@app.post("/owner/manage-billing")
+def owner_manage_billing(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Create a Stripe Customer Portal session."""
+    url = payments.create_billing_portal(db, current_user)
+    return {"url": url}
+
+
+# --- Customer: Create checkout session ---
+@app.post("/checkout/create-session")
+def create_checkout_session(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Create a Stripe Checkout Session for cart items."""
+    result = payments.create_order_checkout(db, current_user)
+    # If dev-mode (simulated), trigger notifications like regular checkout
+    if result.get("session_id") == "sim_dev" and result.get("orders"):
+        for order_info in result["orders"]:
+            order = db.query(models.Order).filter(models.Order.id == order_info["order_id"]).first()
+            rest = db.query(models.Restaurant).filter(models.Restaurant.id == order.restaurant_id).first() if order else None
+            if rest and order:
+                try:
+                    _send_all_notifications(rest, order, order_info["items"], current_user.email, db)
+                except Exception as e:
+                    print(f"[Notification] Failed for order {order.id}: {e}")
+    return result
+
+
+# --- Stripe Webhook ---
+@app.post("/webhooks/stripe")
+async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    """Handle Stripe webhook events."""
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+    return payments.handle_stripe_webhook(payload, sig_header, db)
+
 
 
 # --- Customer: My Orders (track status) ---

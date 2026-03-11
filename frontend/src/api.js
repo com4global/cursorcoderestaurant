@@ -113,14 +113,32 @@ export async function fetchCart(token) {
 
 // --- Order Management APIs ---
 
-export async function fetchOrders(token, restaurantId) {
-  return request(`/owner/restaurants/${restaurantId}/orders`, {
+export async function fetchOrders(token, restaurantId, { search, dateFrom, dateTo } = {}) {
+  const params = new URLSearchParams();
+  if (search) params.set("search", search);
+  if (dateFrom) params.set("date_from", dateFrom);
+  if (dateTo) params.set("date_to", dateTo);
+  const qs = params.toString() ? `?${params.toString()}` : "";
+  return request(`/owner/restaurants/${restaurantId}/orders${qs}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }
 
-export async function fetchArchivedOrders(token, restaurantId, page = 1) {
-  return request(`/owner/restaurants/${restaurantId}/orders/archived?page=${page}`, {
+export async function fetchArchivedOrders(token, restaurantId, page = 1, { search, dateFrom, dateTo } = {}) {
+  const params = new URLSearchParams({ page: String(page) });
+  if (search) params.set("search", search);
+  if (dateFrom) params.set("date_from", dateFrom);
+  if (dateTo) params.set("date_to", dateTo);
+  return request(`/owner/restaurants/${restaurantId}/orders/archived?${params.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function fetchAnalytics(token, restaurantId, period = "month", dateFrom, dateTo) {
+  const params = new URLSearchParams({ period });
+  if (dateFrom) params.set("date_from", dateFrom);
+  if (dateTo) params.set("date_to", dateTo);
+  return request(`/owner/restaurants/${restaurantId}/analytics?${params.toString()}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }
@@ -197,4 +215,41 @@ export async function voiceChat(message, context = "") {
     throw new Error(text || "Chat failed");
   }
   return resp.json(); // { reply }
+}
+
+// --- Payment APIs ---
+
+export async function startOwnerTrial(token) {
+  return request("/owner/start-trial", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function createOwnerSubscription(token, plan) {
+  return request("/owner/subscribe", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ plan }),
+  });
+}
+
+export async function getOwnerSubscription(token) {
+  return request("/owner/subscription", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getManageBillingUrl(token) {
+  return request("/owner/manage-billing", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function createCheckoutSession(token) {
+  return request("/checkout/create-session", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
 }

@@ -122,3 +122,39 @@ class ChatMessage(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     session = relationship("ChatSession", back_populates="messages")
+
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
+    plan = Column(String(20), default="free_trial", nullable=False)  # free_trial, standard, corporate
+    status = Column(String(20), default="trialing", nullable=False)  # trialing, active, canceled, past_due
+    stripe_customer_id = Column(String(255), nullable=True)
+    stripe_subscription_id = Column(String(255), nullable=True)
+    trial_start = Column(DateTime, nullable=True)
+    trial_end = Column(DateTime, nullable=True)
+    current_period_start = Column(DateTime, nullable=True)
+    current_period_end = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user = relationship("User", backref="subscription_rel")
+
+
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=True)
+    subscription_id = Column(Integer, nullable=True)  # No FK — avoids UUID/int mismatch on Supabase
+    stripe_payment_intent_id = Column(String(255), nullable=True)
+    stripe_checkout_session_id = Column(String(255), nullable=True)
+    amount_cents = Column(Integer, default=0, nullable=False)
+    status = Column(String(40), default="pending", nullable=False)  # pending, completed, failed
+    payment_type = Column(String(20), default="order", nullable=False)  # order, subscription
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user = relationship("User", backref="payments")
+

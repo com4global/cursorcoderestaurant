@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat } from "./api.js";
+import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
 
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
@@ -618,7 +618,38 @@ export default function App() {
       setToken(res.access_token);
       const role = res.role || "customer";
       setUserRole(role); localStorage.setItem("userRole", role);
-      if (role === "owner" || role === "admin") setShowOwnerPortal(true);
+      if (role === "owner" || role === "admin") {
+        setShowOwnerPortal(true);
+      } else {
+        // Redirect customers to home and sync location
+        setTab("home");
+        // Use saved zipcode or detect GPS location
+        const savedZip = localStorage.getItem("zipcode");
+        if (savedZip) {
+          lookupZipcodeAuto(savedZip);
+        } else if (userLat != null && userLng != null) {
+          fetchRestaurantsData(userLat, userLng, radius);
+        } else if (navigator.geolocation) {
+          setLocating(true); setLocationLabel("Detecting...");
+          navigator.geolocation.getCurrentPosition(
+            async (pos) => {
+              const lat = pos.coords.latitude, lng = pos.coords.longitude;
+              setUserLat(lat); setUserLng(lng);
+              try {
+                const geoRes = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`);
+                const geo = await geoRes.json();
+                setLocationLabel(`${geo.city || geo.locality || ""}, ${geo.principalSubdivisionCode || geo.countryCode || ""}`);
+              } catch { setLocationLabel(`${lat.toFixed(2)}, ${lng.toFixed(2)}`); }
+              await fetchRestaurantsData(lat, lng, radius);
+              setLocating(false);
+            },
+            () => { setLocationLabel(""); fetchRestaurantsData(null, null, radius); setLocating(false); },
+            { timeout: 5000 }
+          );
+        } else {
+          fetchRestaurantsData(null, null, radius);
+        }
+      }
       setStatus("Ready.");
     } catch (err) { setStatus(err.message || "Auth failed."); }
   };
@@ -1082,6 +1113,9 @@ export default function App() {
                 <button className="auth-switch" onClick={() => setMode(mode === "login" ? "register" : "login")}>
                   {mode === "login" ? "Need an account? Sign up" : "Already have an account? Sign in"}
                 </button>
+                <button className="auth-switch" onClick={() => setShowOwnerPortal(true)} style={{ marginTop: 4, color: '#f59e0b' }}>
+                  🏪 Are you a restaurant owner?
+                </button>
                 {status !== "Ready." && <p className="auth-status">{status}</p>}
               </div>
             ) : (
@@ -1094,11 +1128,9 @@ export default function App() {
                   </div>
                 </div>
                 <div className="profile-actions">
-                  {(userRole === "owner" || userRole === "admin") && (
-                    <button className="profile-action-btn" onClick={() => setShowOwnerPortal(true)}>
-                      <span className="action-icon">🏪</span> Owner Dashboard
-                    </button>
-                  )}
+                  <button className="profile-action-btn" onClick={() => setShowOwnerPortal(true)}>
+                    <span className="action-icon">🏪</span> Restaurant Owner Portal
+                  </button>
                   <button className="profile-action-btn danger" onClick={handleLogout}>
                     <span className="action-icon">🚪</span> Log out
                   </button>
@@ -1137,19 +1169,25 @@ export default function App() {
                 onClick={async () => {
                   setCheckingOut(true);
                   try {
-                    await checkout(token);
-                    setCartData(null); setShowCartPanel(false);
-                    setTab("orders"); setOrdersTab("current");
-                    setTimeout(() => { fetchMyOrders(token).then(setMyOrders).catch(() => { }); }, 500);
-                    setTimeout(() => { fetchMyOrders(token).then(setMyOrders).catch(() => { }); }, 2000);
-                    setTimeout(async () => {
-                      try { const c = await fetchCart(token); setCartData(c); } catch { }
-                      fetchMyOrders(token).then(setMyOrders).catch(() => { });
-                    }, 5000);
+                    const res = await createCheckoutSession(token);
+                    if (res.checkout_url && res.session_id !== 'sim_dev') {
+                      // Redirect to Stripe Checkout
+                      window.location.href = res.checkout_url;
+                    } else {
+                      // Dev mode: orders confirmed directly
+                      setCartData(null); setShowCartPanel(false);
+                      setTab("orders"); setOrdersTab("current");
+                      setTimeout(() => { fetchMyOrders(token).then(setMyOrders).catch(() => { }); }, 500);
+                      setTimeout(() => { fetchMyOrders(token).then(setMyOrders).catch(() => { }); }, 2000);
+                      setTimeout(async () => {
+                        try { const c = await fetchCart(token); setCartData(c); } catch { }
+                        fetchMyOrders(token).then(setMyOrders).catch(() => { });
+                      }, 5000);
+                    }
                   } catch (err) { alert(err.message || "Checkout failed"); }
                   setCheckingOut(false);
                 }}>
-                {checkingOut ? "⏳ Placing Order..." : "🛒 Place Order"}
+                {checkingOut ? "⏳ Processing Payment..." : "💳 Pay & Place Order"}
               </button>
             </div>
           </motion.div>

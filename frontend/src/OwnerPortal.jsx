@@ -10,12 +10,21 @@ import {
     fetchArchivedOrders,
     updateOrderStatus,
     updateNotifications,
+    startOwnerTrial,
+    createOwnerSubscription,
+    getOwnerSubscription,
+    getManageBillingUrl,
 } from "./api.js";
+import SalesAnalytics from "./SalesAnalytics.jsx";
 
 export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
     const [user, setUser] = useState(null);
     const [myRestaurants, setMyRestaurants] = useState([]);
     const [loading, setLoading] = useState(true);
+
+    // Subscription
+    const [subscription, setSubscription] = useState(null); // { plan, status, active, trial_end, ... }
+    const [subLoading, setSubLoading] = useState(false);
 
     // Registration
     const [regEmail, setRegEmail] = useState("");
@@ -53,6 +62,12 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
     const [archivedOrders, setArchivedOrders] = useState({}); // { restaurantId: { orders, total, page, total_pages } }
     const [archivedLoading, setArchivedLoading] = useState({});
 
+    // Search & date filters
+    const [orderSearch, setOrderSearch] = useState({}); // { restaurantId: "search text" }
+    const [orderDateFrom, setOrderDateFrom] = useState({}); // { restaurantId: "2026-03-01" }
+    const [orderDateTo, setOrderDateTo] = useState({}); // { restaurantId: "2026-03-10" }
+    const searchTimerRef = useRef({});
+
     // Notification settings
     const [notifEmail, setNotifEmail] = useState({});
     const [notifPhone, setNotifPhone] = useState({});
@@ -67,11 +82,11 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
     }, [token]);
 
     // --- Orders polling ---
-    const loadOrders = useCallback(async (restaurantId) => {
+    const loadOrders = useCallback(async (restaurantId, filters) => {
         if (!token) return;
         setOrdersLoading((p) => ({ ...p, [restaurantId]: true }));
         try {
-            const data = await fetchOrders(token, restaurantId);
+            const data = await fetchOrders(token, restaurantId, filters || {});
             const prevCount = lastOrderCounts[restaurantId] || 0;
             const confirmedOrders = data.filter((o) => o.status === "confirmed");
             // Play sound if new confirmed orders appeared
@@ -87,11 +102,11 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
     }, [token, lastOrderCounts]);
 
     // --- Load archived orders ---
-    const loadArchivedOrders = useCallback(async (restaurantId, page = 1) => {
+    const loadArchivedOrders = useCallback(async (restaurantId, page = 1, filters) => {
         if (!token) return;
         setArchivedLoading((p) => ({ ...p, [restaurantId]: true }));
         try {
-            const data = await fetchArchivedOrders(token, restaurantId, page);
+            const data = await fetchArchivedOrders(token, restaurantId, page, filters || {});
             setArchivedOrders((p) => ({ ...p, [restaurantId]: data }));
         } catch {
             // silent
@@ -104,13 +119,65 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
         const intervals = [];
         for (const rId of Object.keys(activeTab)) {
             if (activeTab[rId] === "orders") {
-                loadOrders(parseInt(rId));
-                const iv = setInterval(() => loadOrders(parseInt(rId)), 10000);
+                const filters = {
+                    search: orderSearch[rId] || undefined,
+                    dateFrom: orderDateFrom[rId] || undefined,
+                    dateTo: orderDateTo[rId] || undefined,
+                };
+                loadOrders(parseInt(rId), filters);
+                const iv = setInterval(() => loadOrders(parseInt(rId), filters), 10000);
                 intervals.push(iv);
             }
         }
         return () => intervals.forEach(clearInterval);
-    }, [activeTab, token]);
+    }, [activeTab, token, orderSearch, orderDateFrom, orderDateTo]);
+
+    // --- Debounced search handler ---
+    function handleOrderSearch(rId, value) {
+        setOrderSearch((p) => ({ ...p, [rId]: value }));
+        // Clear existing timer
+        if (searchTimerRef.current[rId]) clearTimeout(searchTimerRef.current[rId]);
+        // Debounce: reload after 500ms of no typing
+        searchTimerRef.current[rId] = setTimeout(() => {
+            const filters = { search: value || undefined, dateFrom: orderDateFrom[rId] || undefined, dateTo: orderDateTo[rId] || undefined };
+            const view = ordersView[rId] || "active";
+            if (view === "active") {
+                loadOrders(rId, filters);
+            } else {
+                loadArchivedOrders(rId, 1, filters);
+            }
+        }, 500);
+    }
+
+    // --- Date filter handler ---
+    function handleDateFilter(rId, field, value) {
+        if (field === "from") setOrderDateFrom((p) => ({ ...p, [rId]: value }));
+        else setOrderDateTo((p) => ({ ...p, [rId]: value }));
+        const filters = {
+            search: orderSearch[rId] || undefined,
+            dateFrom: field === "from" ? (value || undefined) : (orderDateFrom[rId] || undefined),
+            dateTo: field === "to" ? (value || undefined) : (orderDateTo[rId] || undefined),
+        };
+        const view = ordersView[rId] || "active";
+        if (view === "active") {
+            loadOrders(rId, filters);
+        } else {
+            loadArchivedOrders(rId, 1, filters);
+        }
+    }
+
+    // --- Clear all filters ---
+    function clearOrderFilters(rId) {
+        setOrderSearch((p) => ({ ...p, [rId]: "" }));
+        setOrderDateFrom((p) => ({ ...p, [rId]: "" }));
+        setOrderDateTo((p) => ({ ...p, [rId]: "" }));
+        const view = ordersView[rId] || "active";
+        if (view === "active") {
+            loadOrders(rId, {});
+        } else {
+            loadArchivedOrders(rId, 1, {});
+        }
+    }
 
     function playNotificationSound() {
         try {
@@ -141,6 +208,12 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
             const me = await getMe(token);
             setUser(me);
             if (me.role === "owner" || me.role === "admin") {
+                // Load subscription status
+                try {
+                    const sub = await getOwnerSubscription(token);
+                    setSubscription(sub);
+                } catch { setSubscription(null); }
+
                 const rests = await getMyRestaurants(token);
                 setMyRestaurants(rests);
                 // Initialize notification fields
@@ -156,6 +229,45 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
             setUser(null);
         }
         setLoading(false);
+    }
+
+    async function handleStartTrial() {
+        setSubLoading(true);
+        try {
+            const res = await startOwnerTrial(token);
+            setSubscription({ plan: res.plan, status: res.status, active: true, trial_end: res.trial_end });
+        } catch (err) {
+            alert(err.message || "Failed to start trial");
+        }
+        setSubLoading(false);
+    }
+
+    async function handleSubscribe(plan) {
+        setSubLoading(true);
+        try {
+            const res = await createOwnerSubscription(token, plan);
+            if (res.checkout_url) {
+                // If dev-mode (simulated), just refresh subscription
+                if (res.session_id === "sim_dev") {
+                    const sub = await getOwnerSubscription(token);
+                    setSubscription(sub);
+                } else {
+                    window.location.href = res.checkout_url;
+                }
+            }
+        } catch (err) {
+            alert(err.message || "Failed to create subscription");
+        }
+        setSubLoading(false);
+    }
+
+    async function handleManageBilling() {
+        try {
+            const res = await getManageBillingUrl(token);
+            if (res.url) window.location.href = res.url;
+        } catch (err) {
+            alert(err.message || "Billing portal unavailable");
+        }
     }
 
     async function handleRegisterOwner(e) {
@@ -327,7 +439,7 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
     function getTab(rId) { return activeTab[rId] || "menu"; }
     function setTab(rId, tab) {
         setActiveTab((p) => ({ ...p, [rId]: tab }));
-        if (tab === "orders" && !orders[rId]) loadOrders(rId);
+        if (tab === "orders" && !orders[rId]) loadOrders(rId, {});
     }
 
     if (loading) {
@@ -356,11 +468,157 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
         );
     }
 
+    // Subscription required — show pricing page
+    if (!subscription || !subscription.active) {
+        return (
+            <div className="owner-portal">
+                <div className="owner-header">
+                    <h2>🍽️ Choose Your Plan</h2>
+                    <button className="owner-back-btn" onClick={onBack}>← Back</button>
+                </div>
+                {subscription && subscription.trial_expired && (
+                    <div style={{
+                        background: 'linear-gradient(135deg, #7f1d1d, #991b1b)', border: '1px solid #ef4444',
+                        borderRadius: 12, padding: '1rem 1.5rem', margin: '0 1rem 1.5rem', textAlign: 'center'
+                    }}>
+                        <div style={{ fontSize: '1.3rem', marginBottom: 4 }}>⏰ Your Free Trial Has Expired</div>
+                        <div style={{ color: '#fca5a5', fontSize: '0.9rem' }}>
+                            Your 30-day trial ended. Upgrade to continue using the Owner Dashboard.
+                        </div>
+                    </div>
+                )}
+                {(!subscription || !subscription.trial_expired) && (
+                    <p style={{ textAlign: 'center', color: '#aaa', margin: '0.5rem 0 1.5rem', fontSize: '1rem' }}>
+                        Power your restaurant with AI-driven ordering, analytics, and more.
+                    </p>
+                )}
+                <div style={{
+                    display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+                    gap: '1.25rem', padding: '0 1rem', maxWidth: 960, margin: '0 auto'
+                }}>
+                    {/* Free Trial */}
+                    <div style={{
+                        background: 'linear-gradient(145deg, #1a1a2e, #16213e)', borderRadius: 16, padding: '2rem 1.5rem',
+                        border: '1px solid #333', display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center'
+                    }}>
+                        <div style={{ fontSize: '2.5rem', marginBottom: 8 }}>🆓</div>
+                        <h3 style={{ color: '#fff', margin: '0.5rem 0', fontSize: '1.3rem' }}>Free Trial</h3>
+                        <div style={{ fontSize: '2rem', fontWeight: 800, color: '#4ade80', marginBottom: 4 }}>$0</div>
+                        <div style={{ color: '#888', fontSize: '0.85rem', marginBottom: 16 }}>for 1 month</div>
+                        <ul style={{ color: '#ccc', fontSize: '0.85rem', textAlign: 'left', padding: '0 0.5rem', lineHeight: 1.8, listStyle: 'none', margin: '0 0 1.5rem' }}>
+                            <li>✅ Full dashboard access</li>
+                            <li>✅ AI menu import</li>
+                            <li>✅ Order management</li>
+                            <li>✅ Basic analytics</li>
+                            <li>✅ Email notifications</li>
+                        </ul>
+                        <button
+                            onClick={handleStartTrial}
+                            disabled={subLoading || (subscription && subscription.trial_expired)}
+                            style={{
+                                width: '100%', padding: '12px', border: 'none', borderRadius: 10, cursor: 'pointer',
+                                background: (subscription && subscription.trial_expired) ? '#555' : 'linear-gradient(135deg, #4ade80, #22c55e)',
+                                color: (subscription && subscription.trial_expired) ? '#999' : '#000',
+                                fontWeight: 700, fontSize: '1rem', marginTop: 'auto',
+                                opacity: subLoading ? 0.6 : 1,
+                                cursor: (subscription && subscription.trial_expired) ? 'not-allowed' : 'pointer'
+                            }}
+                        >
+                            {(subscription && subscription.trial_expired) ? '❌ Trial Used' : subLoading ? '⏳ Starting...' : '🚀 Start Free Trial'}
+                        </button>
+                    </div>
+
+                    {/* Standard */}
+                    <div style={{
+                        background: 'linear-gradient(145deg, #0f172a, #1e293b)', borderRadius: 16, padding: '2rem 1.5rem',
+                        border: '2px solid #f59e0b', display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center',
+                        position: 'relative', boxShadow: '0 0 30px rgba(245, 158, 11, 0.15)'
+                    }}>
+                        <div style={{
+                            position: 'absolute', top: -12, background: '#f59e0b', color: '#000', padding: '3px 14px',
+                            borderRadius: 20, fontSize: '0.7rem', fontWeight: 800, letterSpacing: 1
+                        }}>MOST POPULAR</div>
+                        <div style={{ fontSize: '2.5rem', marginBottom: 8 }}>💼</div>
+                        <h3 style={{ color: '#fff', margin: '0.5rem 0', fontSize: '1.3rem' }}>Standard</h3>
+                        <div style={{ fontSize: '2rem', fontWeight: 800, color: '#f59e0b', marginBottom: 4 }}>$230</div>
+                        <div style={{ color: '#888', fontSize: '0.85rem', marginBottom: 16 }}>per month</div>
+                        <ul style={{ color: '#ccc', fontSize: '0.85rem', textAlign: 'left', padding: '0 0.5rem', lineHeight: 1.8, listStyle: 'none', margin: '0 0 1.5rem' }}>
+                            <li>✅ Everything in Free Trial</li>
+                            <li>✅ Unlimited restaurants</li>
+                            <li>✅ Priority support</li>
+                            <li>✅ Weekly sales reports</li>
+                            <li>✅ SMS notifications</li>
+                        </ul>
+                        <button
+                            onClick={() => handleSubscribe('standard')} disabled={subLoading}
+                            style={{
+                                width: '100%', padding: '12px', border: 'none', borderRadius: 10, cursor: 'pointer',
+                                background: 'linear-gradient(135deg, #f59e0b, #d97706)', color: '#000',
+                                fontWeight: 700, fontSize: '1rem', marginTop: 'auto',
+                                opacity: subLoading ? 0.6 : 1
+                            }}
+                        >
+                            {subLoading ? '⏳ Processing...' : '💳 Subscribe — $230/mo'}
+                        </button>
+                    </div>
+
+                    {/* Corporate */}
+                    <div style={{
+                        background: 'linear-gradient(145deg, #1a0a2e, #2d1b69)', borderRadius: 16, padding: '2rem 1.5rem',
+                        border: '1px solid #7c3aed', display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center'
+                    }}>
+                        <div style={{ fontSize: '2.5rem', marginBottom: 8 }}>🏢</div>
+                        <h3 style={{ color: '#fff', margin: '0.5rem 0', fontSize: '1.3rem' }}>Corporate</h3>
+                        <div style={{ fontSize: '2rem', fontWeight: 800, color: '#a78bfa', marginBottom: 4 }}>$400</div>
+                        <div style={{ color: '#888', fontSize: '0.85rem', marginBottom: 16 }}>per month</div>
+                        <ul style={{ color: '#ccc', fontSize: '0.85rem', textAlign: 'left', padding: '0 0.5rem', lineHeight: 1.8, listStyle: 'none', margin: '0 0 1.5rem' }}>
+                            <li>✅ Everything in Standard</li>
+                            <li>✅ Daily sales reports</li>
+                            <li>✅ Advanced charts & insights</li>
+                            <li>✅ Multi-location support</li>
+                            <li>✅ Dedicated account manager</li>
+                            <li>✅ Custom branding</li>
+                        </ul>
+                        <button
+                            onClick={() => handleSubscribe('corporate')} disabled={subLoading}
+                            style={{
+                                width: '100%', padding: '12px', border: 'none', borderRadius: 10, cursor: 'pointer',
+                                background: 'linear-gradient(135deg, #8b5cf6, #7c3aed)', color: '#fff',
+                                fontWeight: 700, fontSize: '1rem', marginTop: 'auto',
+                                opacity: subLoading ? 0.6 : 1
+                            }}
+                        >
+                            {subLoading ? '⏳ Processing...' : '💎 Subscribe — $400/mo'}
+                        </button>
+                    </div>
+                </div>
+                {subscription && (subscription.status === 'canceled' || subscription.status === 'expired') && !subscription.trial_expired && (
+                    <p style={{ textAlign: 'center', color: '#ef4444', marginTop: '1rem', fontSize: '0.9rem' }}>
+                        Your subscription has been canceled. Choose a plan to reactivate.
+                    </p>
+                )}
+            </div>
+        );
+    }
+
     return (
         <div className="owner-portal">
             <div className="owner-header">
                 <h2>🍽️ Owner Dashboard</h2>
                 <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                    {subscription && (
+                        <span style={{
+                            background: subscription.plan === 'corporate' ? '#7c3aed' : subscription.plan === 'standard' ? '#f59e0b' : '#4ade80',
+                            color: subscription.plan === 'standard' ? '#000' : '#fff',
+                            padding: '3px 10px', borderRadius: 12, fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase',
+                            display: 'flex', alignItems: 'center', gap: 6
+                        }}>
+                            {subscription.plan === 'free_trial' ? '🆓 Trial' : subscription.plan === 'corporate' ? '🏢 Corporate' : '💼 Standard'}
+                            {subscription.days_remaining != null && subscription.plan === 'free_trial' && (
+                                <span style={{ fontSize: '0.65rem', opacity: 0.9 }}>({subscription.days_remaining}d left)</span>
+                            )}
+                        </span>
+                    )}
                     <span className="owner-email">{user.email}</span>
                     <button className="owner-back-btn" onClick={onBack}>Logout</button>
                 </div>
@@ -421,6 +679,9 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                     <button className={`owner-tab-btn ${tab === "orders" ? "active" : ""}`} onClick={() => setTab(r.id, "orders")}>
                                         📋 Orders {newOrderCount > 0 && <span className="owner-tab-badge">{newOrderCount}</span>}
                                     </button>
+                                    <button className={`owner-tab-btn ${tab === "sales" ? "active" : ""}`} onClick={() => setTab(r.id, "sales")}>
+                                        📊 Sales
+                                    </button>
                                     <button className={`owner-tab-btn ${tab === "menu" ? "active" : ""}`} onClick={() => setTab(r.id, "menu")}>
                                         🍽️ Menu
                                     </button>
@@ -444,11 +705,51 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                                 className={`owner-orders-toggle-btn ${view === "archived" ? "active" : ""}`}
                                                 onClick={() => {
                                                     setOrdersView((p) => ({ ...p, [r.id]: "archived" }));
-                                                    if (!archivedOrders[r.id]) loadArchivedOrders(r.id);
+                                                    if (!archivedOrders[r.id]) {
+                                                        const filters = { search: orderSearch[r.id] || undefined, dateFrom: orderDateFrom[r.id] || undefined, dateTo: orderDateTo[r.id] || undefined };
+                                                        loadArchivedOrders(r.id, 1, filters);
+                                                    }
                                                 }}
                                             >
                                                 📁 Archived {rArchived.total > 0 && <span className="owner-tab-badge-muted">{rArchived.total}</span>}
                                             </button>
+                                        </div>
+
+                                        {/* Search & Date Filters */}
+                                        <div className="owner-orders-filters">
+                                            <div className="owner-search-row">
+                                                <span className="owner-search-icon">🔍</span>
+                                                <input
+                                                    className="owner-search-input"
+                                                    type="text"
+                                                    placeholder="Search by order #, email, or item name..."
+                                                    value={orderSearch[r.id] || ""}
+                                                    onChange={(e) => handleOrderSearch(r.id, e.target.value)}
+                                                />
+                                            </div>
+                                            <div className="owner-date-row">
+                                                <label className="owner-date-field">
+                                                    <span>From</span>
+                                                    <input
+                                                        type="date"
+                                                        value={orderDateFrom[r.id] || ""}
+                                                        onChange={(e) => handleDateFilter(r.id, "from", e.target.value)}
+                                                    />
+                                                </label>
+                                                <label className="owner-date-field">
+                                                    <span>To</span>
+                                                    <input
+                                                        type="date"
+                                                        value={orderDateTo[r.id] || ""}
+                                                        onChange={(e) => handleDateFilter(r.id, "to", e.target.value)}
+                                                    />
+                                                </label>
+                                                {(orderSearch[r.id] || orderDateFrom[r.id] || orderDateTo[r.id]) && (
+                                                    <button className="owner-clear-filters" onClick={() => clearOrderFilters(r.id)}>
+                                                        ✕ Clear
+                                                    </button>
+                                                )}
+                                            </div>
                                         </div>
 
                                         {/* ACTIVE ORDERS VIEW */}
@@ -544,12 +845,18 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                                     <div className="owner-archived-pagination">
                                                         <button
                                                             disabled={rArchived.page <= 1}
-                                                            onClick={() => loadArchivedOrders(r.id, rArchived.page - 1)}
+                                                            onClick={() => {
+                                                                const filters = { search: orderSearch[r.id] || undefined, dateFrom: orderDateFrom[r.id] || undefined, dateTo: orderDateTo[r.id] || undefined };
+                                                                loadArchivedOrders(r.id, rArchived.page - 1, filters);
+                                                            }}
                                                         >← Prev</button>
                                                         <span>Page {rArchived.page} of {rArchived.total_pages}</span>
                                                         <button
                                                             disabled={rArchived.page >= rArchived.total_pages}
-                                                            onClick={() => loadArchivedOrders(r.id, rArchived.page + 1)}
+                                                            onClick={() => {
+                                                                const filters = { search: orderSearch[r.id] || undefined, dateFrom: orderDateFrom[r.id] || undefined, dateTo: orderDateTo[r.id] || undefined };
+                                                                loadArchivedOrders(r.id, rArchived.page + 1, filters);
+                                                            }}
                                                         >Next →</button>
                                                     </div>
                                                 )}
@@ -573,6 +880,13 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                         >
                                             🤖 Import Menu from Website
                                         </button>
+                                    </div>
+                                )}
+
+                                {/* SALES TAB */}
+                                {tab === "sales" && (
+                                    <div className="owner-sales-panel">
+                                        <SalesAnalytics token={token} restaurantId={r.id} restaurantName={r.name} />
                                     </div>
                                 )}
 
@@ -607,6 +921,38 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                             >
                                                 {notifSaving[r.id] ? "Saving..." : "💾 Save Notification Settings"}
                                             </button>
+                                        </div>
+                                        <hr style={{ border: 'none', borderTop: '1px solid #333', margin: '1.5rem 0' }} />
+                                        <h4>💳 Subscription & Billing</h4>
+                                        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
+                                            {subscription && subscription.plan === 'free_trial' && (
+                                                <button
+                                                    className="owner-primary-btn"
+                                                    style={{ background: 'linear-gradient(135deg, #f59e0b, #d97706)', border: 'none', color: '#000' }}
+                                                    onClick={() => { setSubscription(null); }}
+                                                >
+                                                    ⬆️ Upgrade Plan
+                                                </button>
+                                            )}
+                                            {subscription && subscription.plan !== 'free_trial' && (
+                                                <button
+                                                    className="owner-primary-btn"
+                                                    style={{ background: '#333', border: '1px solid #555' }}
+                                                    onClick={handleManageBilling}
+                                                >
+                                                    🔧 Manage Billing
+                                                </button>
+                                            )}
+                                            <div style={{ color: '#888', fontSize: '0.8rem', display: 'flex', alignItems: 'center' }}>
+                                                Current plan: <strong style={{ color: '#fff', marginLeft: 4 }}>
+                                                    {subscription?.plan === 'free_trial' ? 'Free Trial' : subscription?.plan === 'standard' ? 'Standard ($230/mo)' : 'Corporate ($400/mo)'}
+                                                </strong>
+                                                {subscription?.days_remaining != null && subscription?.plan === 'free_trial' && (
+                                                    <span style={{ marginLeft: 8, color: subscription.days_remaining <= 5 ? '#ef4444' : '#4ade80' }}>
+                                                        • {subscription.days_remaining} days remaining
+                                                    </span>
+                                                )}
+                                            </div>
                                         </div>
                                     </div>
                                 )}
