@@ -377,8 +377,8 @@ export default function App() {
   const audioContextRef = useRef(null);
   const voiceAudioRef = useRef(null); // for playing TTS audio
 
-  // Speak text — try Sarvam TTS first, fallback to browser speechSynthesis for mobile
-  const voiceSpeak = useCallback(async (text, autoListenAfter = true) => {
+  // Speak text — use browser speechSynthesis for instant response (no network latency)
+  const voiceSpeak = useCallback((text, autoListenAfter = true) => {
     if (!text) return;
     // Stop any playing audio
     if (voiceAudioRef.current) { voiceAudioRef.current.pause(); voiceAudioRef.current = null; }
@@ -393,43 +393,20 @@ export default function App() {
       }
     };
 
-    try {
-      const result = await voiceTTS(text, "en-IN", "kavya");
-      if (result.audio_base64) {
-        const audio = new Audio(`data:audio/wav;base64,${result.audio_base64}`);
-        voiceAudioRef.current = audio;
-        audio.onended = () => { voiceAudioRef.current = null; afterSpeak(); };
-        audio.onerror = () => {
-          voiceAudioRef.current = null;
-          // Fallback: browser speechSynthesis
-          _browserSpeak(text, afterSpeak);
-        };
-        audio.play().catch(() => {
-          // Autoplay blocked on mobile — use browser speech
-          voiceAudioRef.current = null;
-          _browserSpeak(text, afterSpeak);
-        });
-      } else {
-        _browserSpeak(text, afterSpeak);
-      }
-    } catch (err) {
-      console.error("Sarvam TTS error:", err);
-      _browserSpeak(text, afterSpeak);
-    }
-  }, []);
-
-  // Browser speech fallback
-  const _browserSpeak = (text, onDone) => {
+    // Use browser speechSynthesis — instant, works on all mobile
     if (window.speechSynthesis) {
       const u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.0;
-      u.onend = onDone;
-      u.onerror = onDone;
+      u.rate = 1.05;
+      u.pitch = 1.0;
+      u.lang = "en-US";
+      u.onend = afterSpeak;
+      u.onerror = afterSpeak;
       window.speechSynthesis.speak(u);
     } else {
-      onDone();
+      // No speech synthesis available, just skip to listening
+      afterSpeak();
     }
-  };
+  }, []);
 
   // Start listening via browser SpeechRecognition (fast, works on mobile)
   const voiceStartListening = useCallback(() => {
@@ -526,14 +503,7 @@ export default function App() {
     setMessages((p) => [...p, { role: "user", content: text.trim() }]);
     setMessageText(""); setShowSuggestions(false); setStatus("Thinking...");
     try {
-      // Ensure restaurant context is synced: if user selected restaurant in UI
-      // but chat session might not have it, prefix with #slug first
-      let finalText = text.trim();
-      if (fromVoice && selectedRestaurant?.slug && !finalText.startsWith('#') && !finalText.startsWith('add:')) {
-        // First sync the restaurant by sending #slug, then send the actual text
-        await sendMessage(token, { session_id: sessionId, text: `#${selectedRestaurant.slug}` });
-      }
-      const res = await sendMessage(token, { session_id: sessionId, text: finalText });
+      const res = await sendMessage(token, { session_id: sessionId, text: text.trim() });
       setSessionId(res.session_id);
       setMessages((p) => [...p, {
         role: "bot", content: res.reply,
@@ -556,48 +526,28 @@ export default function App() {
         setTimeout(() => { fetchCart(token).then(setCartData).catch(() => { }); }, 300);
       }
 
-      // Voice mode: speak intelligent reply from Sarvam AI agent
+      // Voice mode: use voice_prompt from backend (fast, no extra API call)
       if (fromVoice && voiceModeRef.current) {
-        let voiceReply = "";
+        const voiceReply = res.voice_prompt || res.reply;
         if (res.reply.toLowerCase().includes("submitted") || res.reply.toLowerCase().includes("placed")) {
-          voiceReply = "Order placed! Thank you!";
+          voiceSpeak("Order placed! Thank you!", false);
           setTimeout(() => {
             voiceModeRef.current = false;
             setVoiceMode(false); setVoiceState("idle");
           }, 2000);
         } else {
-          // Use Sarvam AI chat agent for intelligent voice response
-          try {
-            const context = `Restaurant: ${selectedRestaurant?.name || 'not selected'}. ` +
-              `Categories: ${activeCategories?.map(c => c.name).join(', ') || 'none'}. ` +
-              `Items shown: ${currentItems?.length || 0}. ` +
-              `Chat reply was: ${res.reply}`;
-            const chatRes = await voiceChat(text.trim(), context);
-            voiceReply = chatRes.reply || res.reply;
-          } catch {
-            // Fallback to short replies if chat fails
-            if (res.items && res.items.length > 0) {
-              voiceReply = `${res.items.length} items found. Which one would you like?`;
-            } else if (res.categories && res.categories.length > 0) {
-              voiceReply = "Categories loaded. Which category?";
-            } else if (res.reply.toLowerCase().includes("added")) {
-              voiceReply = "Added! Anything else?";
-            } else {
-              voiceReply = "Got it. What next?";
-            }
-          }
+          // Speak the voice_prompt and auto-listen after
+          voiceSpeak(voiceReply, true);
         }
-        voiceSpeak(voiceReply, !res.reply.toLowerCase().includes("submitted"));
       }
 
       setStatus("Ready.");
     } catch (err) {
-      // Clear processing state immediately
       setVoiceState(voiceModeRef.current ? "idle" : "idle");
       if (err.status === 401) {
         localStorage.removeItem("token"); setToken(null);
         setStatus("Session expired. Please log in again.");
-      } else { setStatus(err.message || "Failed."); }
+      } else { setStatus(err.message || "Failed"); }
       if (fromVoice && voiceModeRef.current) {
         voiceSpeak("Error. Try again.", true);
       }
