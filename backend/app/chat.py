@@ -717,6 +717,7 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
 
     # --- Smart matching: try items FIRST, then categories ---
     # Uses Sarvam AI LLM as fallback when fuzzy matching isn't confident
+    print(f"[MATCH DEBUG] raw='{text}' cleaned='{cleaned}' lower='{lower}' session.category_id={session.category_id} session.restaurant_id={session.restaurant_id}")
     all_items = _get_all_restaurant_items(db, session.restaurant_id)
     input_words = lower.split()
 
