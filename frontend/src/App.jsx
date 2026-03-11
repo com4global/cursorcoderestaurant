@@ -201,6 +201,7 @@ export default function App() {
   const inputRef = useRef(null);
   const chatEndRef = useRef(null);
   const [addedItemId, setAddedItemId] = useState(null);
+  const doSendRef = useRef(null); // Ref to always access latest doSend (avoids stale closures in voice callbacks)
 
   // ===================== EFFECTS =====================
 
@@ -441,7 +442,7 @@ export default function App() {
       if (finalText) {
         setIsListening(false);
         setVoiceState("processing");
-        doSend(finalText.trim(), true);
+        doSendRef.current(finalText.trim(), true);
       }
     };
 
@@ -553,6 +554,8 @@ export default function App() {
       }
     }
   };
+  // Keep ref in sync so voice callbacks (stale closures) always call the latest doSend
+  doSendRef.current = doSend;
 
   const handleSend = (e) => { e.preventDefault(); doSend(messageText); };
   const handleCategoryClick = (cat) => { setActiveCategoryName(cat.name); doSend(`category:${cat.id}`); };
