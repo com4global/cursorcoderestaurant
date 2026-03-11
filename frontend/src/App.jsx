@@ -383,90 +383,55 @@ export default function App() {
   // Tiny silent WAV to 'warm up' audio element on user gesture (iOS requirement)
   const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
 
-  // Speak text — Sarvam AI Bulbul v3 TTS (primary), browser SpeechSynthesis (fallback)
+  // Speak text — Browser SpeechSynthesis (reliable on all devices)
   const voiceSpeak = (text, autoListenAfter = true) => {
     if (!text) return;
     // Stop any playing audio
-    if (voiceAudioRef.current) { voiceAudioRef.current.pause(); voiceAudioRef.current = null; }
     window.speechSynthesis?.cancel();
     setVoiceState("speaking");
 
     const afterSpeak = () => {
       if (autoListenAfter && voiceModeRef.current) {
-        voiceStartListeningRef.current();  // Use ref to avoid stale closure
+        voiceStartListeningRef.current();
       } else {
         setVoiceState("idle");
       }
     };
 
-    // --- BACKUP: Browser SpeechSynthesis (uncomment to switch back) ---
-    // if (window.speechSynthesis) {
-    //   const u = new SpeechSynthesisUtterance(text);
-    //   u.rate = 1.05;
-    //   u.pitch = 1.0;
-    //   u.lang = "en-US";
-    //   u.onend = afterSpeak;
-    //   u.onerror = afterSpeak;
-    //   window.speechSynthesis.speak(u);
-    // } else {
-    //   afterSpeak();
-    // }
-
-    // --- PRIMARY: Sarvam AI Bulbul v3 TTS ---
-    // Safety timeout: if TTS takes >15s, fall back to browser voice
-    let ttsCompleted = false;
-    const safeAfterSpeak = () => { if (!ttsCompleted) { ttsCompleted = true; afterSpeak(); } };
-    const safetyTimer = setTimeout(() => {
-      console.warn("Sarvam TTS timeout, using browser fallback");
-      if (!ttsCompleted) { ttsCompleted = true; fallbackBrowserTTS(text, afterSpeak); }
-    }, 15000);
-
-    const useSarvamTTS = async () => {
-      try {
-        const result = await voiceTTS(text, "en-IN", "kavya");
-        if (ttsCompleted) return;
-        if (result.audio_base64) {
-          clearTimeout(safetyTimer);
-          const binaryStr = atob(result.audio_base64);
-          const bytes = new Uint8Array(binaryStr.length);
-          for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-          const blob = new Blob([bytes], { type: "audio/wav" });
-          const blobUrl = URL.createObjectURL(blob);
-
-          // Use the warmed-up <audio> element (unlocked at mic tap for iOS)
-          const el = ttsAudioElRef.current;
-          if (!el) { URL.revokeObjectURL(blobUrl); fallbackBrowserTTS(text, safeAfterSpeak); return; }
-          el.onended = () => { URL.revokeObjectURL(blobUrl); safeAfterSpeak(); };
-          el.onerror = () => { URL.revokeObjectURL(blobUrl); fallbackBrowserTTS(text, safeAfterSpeak); };
-          el.src = blobUrl;
-          el.play().catch(() => { URL.revokeObjectURL(blobUrl); fallbackBrowserTTS(text, safeAfterSpeak); });
-          return;
-        }
-        clearTimeout(safetyTimer);
-        fallbackBrowserTTS(text, safeAfterSpeak);
-      } catch (err) {
-        console.warn("Sarvam TTS failed, using browser fallback:", err);
-        clearTimeout(safetyTimer);
-        fallbackBrowserTTS(text, safeAfterSpeak);
-      }
-    };
-
-    useSarvamTTS();
-  };
-
-  // Fallback: browser SpeechSynthesis (kept for reliability)
-  const fallbackBrowserTTS = (text, onDone) => {
+    // PRIMARY: Browser SpeechSynthesis — works reliably on all mobile devices
     if (window.speechSynthesis) {
       const u = new SpeechSynthesisUtterance(text);
       u.rate = 1.05;
       u.pitch = 1.0;
       u.lang = "en-US";
-      u.onend = onDone;
-      u.onerror = onDone;
+      u.onend = afterSpeak;
+      u.onerror = afterSpeak;
       window.speechSynthesis.speak(u);
     } else {
-      onDone();
+      afterSpeak();
     }
+
+    // --- BACKUP: Sarvam AI Bulbul v3 TTS (kept for future use) ---
+    // To switch to Sarvam TTS, comment out the browser SpeechSynthesis block above
+    // and uncomment the code below. Note: requires iOS audio workaround.
+    // const useSarvamTTS = async () => {
+    //   try {
+    //     const result = await voiceTTS(text, "en-IN", "kavya");
+    //     if (result.audio_base64) {
+    //       const binaryStr = atob(result.audio_base64);
+    //       const bytes = new Uint8Array(binaryStr.length);
+    //       for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+    //       const blob = new Blob([bytes], { type: "audio/wav" });
+    //       const blobUrl = URL.createObjectURL(blob);
+    //       const el = ttsAudioElRef.current || new Audio();
+    //       el.onended = () => { URL.revokeObjectURL(blobUrl); afterSpeak(); };
+    //       el.onerror = () => { URL.revokeObjectURL(blobUrl); afterSpeak(); };
+    //       el.src = blobUrl;
+    //       el.play().catch(() => afterSpeak());
+    //     } else { afterSpeak(); }
+    //   } catch (err) { console.warn("Sarvam TTS failed:", err); afterSpeak(); }
+    // };
+    // useSarvamTTS();
   };
   voiceSpeakRef.current = voiceSpeak;  // Keep ref in sync
 
@@ -546,14 +511,6 @@ export default function App() {
     } else {
       voiceModeRef.current = true;
       setVoiceMode(true);
-      // Warm up <audio> element NOW on user gesture (iOS requires this)
-      if (!ttsAudioElRef.current) {
-        ttsAudioElRef.current = new Audio();
-        ttsAudioElRef.current.volume = 1.0;
-      }
-      // Play silent WAV to unlock audio on iOS Safari
-      ttsAudioElRef.current.src = SILENT_WAV;
-      ttsAudioElRef.current.play().catch(() => { });
       // Short initial prompt based on current state
       let prompt;
       if (!selectedRestaurant) prompt = "Which restaurant would you like?";
