@@ -721,40 +721,51 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
     all_items = _get_all_restaurant_items(db, session.restaurant_id)
     input_words = lower.split()
 
-    # Step 0: If user is already in a category, try matching within THAT category first
-    # This prevents "samosa chat" from re-matching category "Chat" when user is already viewing Chat items
-    category_items = []
-    if session.category_id:
-        category_items = [i for i in all_items if i.category_id == session.category_id]
+    # PRIORITY CHECK: If input exactly matches a category name, skip item matching
+    # This prevents "chat" from matching "Samosa Chaat" as an item
+    # while still allowing "samosa chat" (multi-word) to match items first
+    categories = crud.list_categories(db, session.restaurant_id)
+    exact_cat_match = None
+    for cat in categories:
+        if cat.name.lower() == lower:
+            exact_cat_match = cat
+            break
 
+    # Only do item matching if input does NOT exactly match a category name
     item_parsed = []
+    if not exact_cat_match:
+        # Step 0: If user is already in a category, try matching within THAT category first
+        # This prevents "samosa chat" from re-matching category "Chat" when user is already viewing Chat items
+        category_items = []
+        if session.category_id:
+            category_items = [i for i in all_items if i.category_id == session.category_id]
 
-    # Step 1a: Try fuzzy item matching within current category first
-    if category_items:
-        item_parsed = _parse_order_items(cleaned, category_items)
+        # Step 1a: Try fuzzy item matching within current category first
+        if category_items:
+            item_parsed = _parse_order_items(cleaned, category_items)
+            if not item_parsed:
+                single = _find_best_item(cleaned, category_items)
+                if single:
+                    item_parsed = [(single, 1)]
+            # Step 1b: Try LLM matching within current category
+            if not item_parsed:
+                llm_item = _llm_match_item(cleaned, category_items)
+                if llm_item:
+                    item_parsed = [(llm_item, 1)]
+
+        # Step 2: If not found in current category, try ALL restaurant items
         if not item_parsed:
-            single = _find_best_item(cleaned, category_items)
-            if single:
-                item_parsed = [(single, 1)]
-        # Step 1b: Try LLM matching within current category
+            item_parsed = _parse_order_items(cleaned, all_items)
+            if not item_parsed:
+                single = _find_best_item(cleaned, all_items)
+                if single:
+                    item_parsed = [(single, 1)]
+
+        # Step 3: LLM fallback on all items
         if not item_parsed:
-            llm_item = _llm_match_item(cleaned, category_items)
+            llm_item = _llm_match_item(cleaned, all_items)
             if llm_item:
                 item_parsed = [(llm_item, 1)]
-
-    # Step 2: If not found in current category, try ALL restaurant items
-    if not item_parsed:
-        item_parsed = _parse_order_items(cleaned, all_items)
-        if not item_parsed:
-            single = _find_best_item(cleaned, all_items)
-            if single:
-                item_parsed = [(single, 1)]
-
-    # Step 3: LLM fallback on all items
-    if not item_parsed:
-        llm_item = _llm_match_item(cleaned, all_items)
-        if llm_item:
-            item_parsed = [(llm_item, 1)]
 
     if item_parsed:
         # Found an item match — add to cart
