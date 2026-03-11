@@ -2058,6 +2058,91 @@ img {
   padding: 12px 16px;
 }
 
+/* Active / Archived toggle */
+.owner-orders-toggle {
+  display: flex;
+  gap: 0;
+  margin-bottom: 14px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: var(--radius-md);
+  padding: 3px;
+}
+
+.owner-orders-toggle-btn {
+  flex: 1;
+  padding: 8px 12px;
+  text-align: center;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.owner-orders-toggle-btn.active {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+}
+
+.owner-tab-badge-muted {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-dim);
+  font-size: 0.62rem;
+  font-weight: 700;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+/* Archived order card */
+.owner-order-archived {
+  opacity: 0.7;
+  border-color: rgba(255, 255, 255, 0.05);
+}
+
+/* Archived pagination */
+.owner-archived-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 12px 0;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.owner-archived-pagination button {
+  padding: 6px 14px;
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.owner-archived-pagination button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.owner-archived-pagination button:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
 .owner-order-card {
   background: var(--bg-card);
   border: 1px solid var(--border);

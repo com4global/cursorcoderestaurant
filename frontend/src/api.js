@@ -119,6 +119,12 @@ export async function fetchOrders(token, restaurantId) {
   });
 }
 
+export async function fetchArchivedOrders(token, restaurantId, page = 1) {
+  return request(`/owner/restaurants/${restaurantId}/orders/archived?page=${page}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 export async function updateOrderStatus(token, orderId, status) {
   return request(`/owner/orders/${orderId}/status`, {
     method: "PATCH",

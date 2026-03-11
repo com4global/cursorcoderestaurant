@@ -7,6 +7,7 @@ import {
     importMenuFromUrl,
     saveImportedMenu,
     fetchOrders,
+    fetchArchivedOrders,
     updateOrderStatus,
     updateNotifications,
 } from "./api.js";
@@ -47,6 +48,11 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
     const [lastOrderCounts, setLastOrderCounts] = useState({});
     const audioRef = useRef(null);
 
+    // Archived orders
+    const [ordersView, setOrdersView] = useState({}); // { restaurantId: "active" | "archived" }
+    const [archivedOrders, setArchivedOrders] = useState({}); // { restaurantId: { orders, total, page, total_pages } }
+    const [archivedLoading, setArchivedLoading] = useState({});
+
     // Notification settings
     const [notifEmail, setNotifEmail] = useState({});
     const [notifPhone, setNotifPhone] = useState({});
@@ -79,6 +85,19 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
         }
         setOrdersLoading((p) => ({ ...p, [restaurantId]: false }));
     }, [token, lastOrderCounts]);
+
+    // --- Load archived orders ---
+    const loadArchivedOrders = useCallback(async (restaurantId, page = 1) => {
+        if (!token) return;
+        setArchivedLoading((p) => ({ ...p, [restaurantId]: true }));
+        try {
+            const data = await fetchArchivedOrders(token, restaurantId, page);
+            setArchivedOrders((p) => ({ ...p, [restaurantId]: data }));
+        } catch {
+            // silent
+        }
+        setArchivedLoading((p) => ({ ...p, [restaurantId]: false }));
+    }, [token]);
 
     // Poll orders for restaurants with "orders" tab active
     useEffect(() => {
@@ -380,7 +399,9 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                 <div className="owner-restaurants-list">
                     {myRestaurants.map((r) => {
                         const tab = getTab(r.id);
+                        const view = ordersView[r.id] || "active";
                         const rOrders = orders[r.id] || [];
+                        const rArchived = archivedOrders[r.id] || { orders: [], total: 0, page: 1, total_pages: 0 };
                         const newOrderCount = rOrders.filter((o) => o.status === "confirmed").length;
                         return (
                             <div key={r.id} className="owner-restaurant-block">
@@ -411,67 +432,129 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                 {/* ORDERS TAB */}
                                 {tab === "orders" && (
                                     <div className="owner-orders-panel">
-                                        {ordersLoading[r.id] && rOrders.length === 0 && (
-                                            <p className="owner-loading-text">Loading orders...</p>
-                                        )}
-                                        {!ordersLoading[r.id] && rOrders.length === 0 && (
-                                            <p className="owner-empty">No orders yet. Orders will appear here when customers check out.</p>
-                                        )}
-                                        {rOrders.map((order) => (
-                                            <div key={order.id} className={`owner-order-card ${order.status === "confirmed" ? "owner-order-new" : ""}`}>
-                                                <div className="owner-order-header">
-                                                    <span className="owner-order-id">Order #{order.id}</span>
-                                                    <StatusBadge status={order.status} />
-                                                </div>
-                                                <div className="owner-order-meta">
-                                                    <span>👤 {order.customer_email || "Guest"}</span>
-                                                    <span>🕐 {new Date(order.created_at).toLocaleString()}</span>
-                                                </div>
-                                                <div className="owner-order-items">
-                                                    {order.items.map((item, idx) => (
-                                                        <div key={idx} className="owner-order-item-row">
-                                                            <span>{item.name} × {item.quantity}</span>
-                                                            <span>${(item.price_cents / 100).toFixed(2)}</span>
+                                        {/* Active / Archived toggle */}
+                                        <div className="owner-orders-toggle">
+                                            <button
+                                                className={`owner-orders-toggle-btn ${view === "active" ? "active" : ""}`}
+                                                onClick={() => setOrdersView((p) => ({ ...p, [r.id]: "active" }))}
+                                            >
+                                                📋 Active {rOrders.length > 0 && <span className="owner-tab-badge">{rOrders.length}</span>}
+                                            </button>
+                                            <button
+                                                className={`owner-orders-toggle-btn ${view === "archived" ? "active" : ""}`}
+                                                onClick={() => {
+                                                    setOrdersView((p) => ({ ...p, [r.id]: "archived" }));
+                                                    if (!archivedOrders[r.id]) loadArchivedOrders(r.id);
+                                                }}
+                                            >
+                                                📁 Archived {rArchived.total > 0 && <span className="owner-tab-badge-muted">{rArchived.total}</span>}
+                                            </button>
+                                        </div>
+
+                                        {/* ACTIVE ORDERS VIEW */}
+                                        {view === "active" && (
+                                            <>
+                                                {ordersLoading[r.id] && rOrders.length === 0 && (
+                                                    <p className="owner-loading-text">Loading orders...</p>
+                                                )}
+                                                {!ordersLoading[r.id] && rOrders.length === 0 && (
+                                                    <p className="owner-empty">No active orders. Completed orders are in the Archived tab.</p>
+                                                )}
+                                                {rOrders.map((order) => (
+                                                    <div key={order.id} className={`owner-order-card ${order.status === "confirmed" ? "owner-order-new" : ""}`}>
+                                                        <div className="owner-order-header">
+                                                            <span className="owner-order-id">Order #{order.id}</span>
+                                                            <StatusBadge status={order.status} />
                                                         </div>
-                                                    ))}
-                                                </div>
-                                                <div className="owner-order-total">
-                                                    Total: <strong>${(order.total_cents / 100).toFixed(2)}</strong>
-                                                </div>
-                                                {/* Action buttons based on status */}
-                                                {order.status === "confirmed" && (
-                                                    <div className="owner-order-actions">
-                                                        <button className="owner-accept-btn" onClick={() => handleStatusChange(r.id, order.id, "accepted")}>
-                                                            ✅ Accept
-                                                        </button>
-                                                        <button className="owner-reject-btn" onClick={() => handleStatusChange(r.id, order.id, "rejected")}>
-                                                            ❌ Reject
-                                                        </button>
+                                                        <div className="owner-order-meta">
+                                                            <span>👤 {order.customer_email || "Guest"}</span>
+                                                            <span>🕐 {new Date(order.created_at).toLocaleString()}</span>
+                                                        </div>
+                                                        <div className="owner-order-items">
+                                                            {order.items.map((item, idx) => (
+                                                                <div key={idx} className="owner-order-item-row">
+                                                                    <span>{item.name} × {item.quantity}</span>
+                                                                    <span>${(item.price_cents / 100).toFixed(2)}</span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                        <div className="owner-order-total">
+                                                            Total: <strong>${(order.total_cents / 100).toFixed(2)}</strong>
+                                                        </div>
+                                                        {order.status === "confirmed" && (
+                                                            <div className="owner-order-actions">
+                                                                <button className="owner-accept-btn" onClick={() => handleStatusChange(r.id, order.id, "accepted")}>✅ Accept</button>
+                                                                <button className="owner-reject-btn" onClick={() => handleStatusChange(r.id, order.id, "rejected")}>❌ Reject</button>
+                                                            </div>
+                                                        )}
+                                                        {order.status === "accepted" && (
+                                                            <div className="owner-order-actions">
+                                                                <button className="owner-preparing-btn" onClick={() => handleStatusChange(r.id, order.id, "preparing")}>🍳 Start Preparing</button>
+                                                            </div>
+                                                        )}
+                                                        {order.status === "preparing" && (
+                                                            <div className="owner-order-actions">
+                                                                <button className="owner-ready-btn" onClick={() => handleStatusChange(r.id, order.id, "ready")}>📦 Mark Ready</button>
+                                                            </div>
+                                                        )}
+                                                        {order.status === "ready" && (
+                                                            <div className="owner-order-actions">
+                                                                <button className="owner-complete-btn" onClick={() => handleStatusChange(r.id, order.id, "completed")}>✓ Complete</button>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </>
+                                        )}
+
+                                        {/* ARCHIVED ORDERS VIEW */}
+                                        {view === "archived" && (
+                                            <>
+                                                {archivedLoading[r.id] && (
+                                                    <p className="owner-loading-text">Loading archived orders...</p>
+                                                )}
+                                                {!archivedLoading[r.id] && rArchived.orders.length === 0 && (
+                                                    <p className="owner-empty">No archived orders yet.</p>
+                                                )}
+                                                {rArchived.orders.map((order) => (
+                                                    <div key={order.id} className="owner-order-card owner-order-archived">
+                                                        <div className="owner-order-header">
+                                                            <span className="owner-order-id">Order #{order.id}</span>
+                                                            <StatusBadge status={order.status} />
+                                                        </div>
+                                                        <div className="owner-order-meta">
+                                                            <span>👤 {order.customer_email || "Guest"}</span>
+                                                            <span>🕐 {new Date(order.created_at).toLocaleString()}</span>
+                                                        </div>
+                                                        <div className="owner-order-items">
+                                                            {order.items.map((item, idx) => (
+                                                                <div key={idx} className="owner-order-item-row">
+                                                                    <span>{item.name} × {item.quantity}</span>
+                                                                    <span>${(item.price_cents / 100).toFixed(2)}</span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                        <div className="owner-order-total">
+                                                            Total: <strong>${(order.total_cents / 100).toFixed(2)}</strong>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                                {/* Pagination */}
+                                                {rArchived.total_pages > 1 && (
+                                                    <div className="owner-archived-pagination">
+                                                        <button
+                                                            disabled={rArchived.page <= 1}
+                                                            onClick={() => loadArchivedOrders(r.id, rArchived.page - 1)}
+                                                        >← Prev</button>
+                                                        <span>Page {rArchived.page} of {rArchived.total_pages}</span>
+                                                        <button
+                                                            disabled={rArchived.page >= rArchived.total_pages}
+                                                            onClick={() => loadArchivedOrders(r.id, rArchived.page + 1)}
+                                                        >Next →</button>
                                                     </div>
                                                 )}
-                                                {order.status === "accepted" && (
-                                                    <div className="owner-order-actions">
-                                                        <button className="owner-preparing-btn" onClick={() => handleStatusChange(r.id, order.id, "preparing")}>
-                                                            🍳 Start Preparing
-                                                        </button>
-                                                    </div>
-                                                )}
-                                                {order.status === "preparing" && (
-                                                    <div className="owner-order-actions">
-                                                        <button className="owner-ready-btn" onClick={() => handleStatusChange(r.id, order.id, "ready")}>
-                                                            📦 Mark Ready
-                                                        </button>
-                                                    </div>
-                                                )}
-                                                {order.status === "ready" && (
-                                                    <div className="owner-order-actions">
-                                                        <button className="owner-complete-btn" onClick={() => handleStatusChange(r.id, order.id, "completed")}>
-                                                            ✓ Complete
-                                                        </button>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        ))}
+                                            </>
+                                        )}
                                     </div>
                                 )}
 

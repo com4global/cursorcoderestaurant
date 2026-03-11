@@ -438,27 +438,90 @@ def delete_item(item_id: int, db: Session = Depends(get_db), current_user=Depend
 
 # --- Owner: View orders ---
 @app.get("/owner/restaurants/{restaurant_id}/orders")
-def owner_orders(restaurant_id: int, status: str | None = None, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+def owner_orders(
+    restaurant_id: int,
+    status: str | None = None,
+    exclude_status: str | None = "completed,rejected",
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Get active orders. By default excludes completed and rejected orders for fast loading."""
     r = db.query(models.Restaurant).filter(models.Restaurant.id == restaurant_id, models.Restaurant.owner_id == current_user.id).first()
     if not r:
         raise HTTPException(status_code=404, detail="Restaurant not found")
     q = db.query(models.Order).filter(models.Order.restaurant_id == restaurant_id)
     if status:
         q = q.filter(models.Order.status == status)
+    elif exclude_status:
+        excluded = [s.strip() for s in exclude_status.split(",") if s.strip()]
+        if excluded:
+            q = q.filter(~models.Order.status.in_(excluded))
     orders = q.order_by(models.Order.created_at.desc()).limit(50).all()
+    return _serialize_orders(db, orders)
+
+
+@app.get("/owner/restaurants/{restaurant_id}/orders/archived")
+def owner_orders_archived(
+    restaurant_id: int,
+    page: int = 1,
+    per_page: int = 20,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Get archived (completed/rejected) orders with pagination."""
+    r = db.query(models.Restaurant).filter(models.Restaurant.id == restaurant_id, models.Restaurant.owner_id == current_user.id).first()
+    if not r:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+    q = db.query(models.Order).filter(
+        models.Order.restaurant_id == restaurant_id,
+        models.Order.status.in_(["completed", "rejected"]),
+    )
+    total = q.count()
+    orders = q.order_by(models.Order.created_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
+    return {
+        "orders": _serialize_orders(db, orders),
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": (total + per_page - 1) // per_page if per_page else 1,
+    }
+
+
+def _serialize_orders(db, orders):
+    """Serialize a list of Order objects to dicts."""
+    # Batch-load all menu item IDs + user IDs to avoid N+1 queries
+    item_ids = set()
+    user_ids = set()
+    for o in orders:
+        user_ids.add(o.user_id)
+        for oi in o.items:
+            item_ids.add(oi.menu_item_id)
+
+    menu_items = {}
+    if item_ids:
+        for mi in db.query(models.MenuItem).filter(models.MenuItem.id.in_(item_ids)).all():
+            menu_items[mi.id] = mi.name
+
+    users = {}
+    if user_ids:
+        for u in db.query(models.User).filter(models.User.id.in_(user_ids)).all():
+            users[u.id] = u.email
+
     results = []
     for o in orders:
         items = []
         for oi in o.items:
-            mi = db.query(models.MenuItem).get(oi.menu_item_id)
-            items.append({"name": mi.name if mi else "?", "quantity": oi.quantity, "price_cents": oi.price_cents})
-        user = db.query(models.User).get(o.user_id)
+            items.append({
+                "name": menu_items.get(oi.menu_item_id, "?"),
+                "quantity": oi.quantity,
+                "price_cents": oi.price_cents,
+            })
         results.append({
             "id": o.id,
             "status": o.status,
             "total_cents": o.total_cents,
             "created_at": o.created_at.isoformat(),
-            "customer_email": user.email if user else None,
+            "customer_email": users.get(o.user_id),
             "items": items,
         })
     return results
