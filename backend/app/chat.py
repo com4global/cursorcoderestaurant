@@ -587,6 +587,7 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                         _set_session_state(db, session, restaurant_id=direct_cat.restaurant_id)
                         categories = crud.list_categories(db, direct_cat.restaurant_id)
         if match:
+            _set_session_state(db, session, category_id=match.id)
             items = _items_data(db, match.id)
             cats = _categories_data(db, session.restaurant_id or match.restaurant_id)
             return _result(
@@ -629,6 +630,73 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             restaurant_id=session.restaurant_id,
             voice_prompt="I couldn't find that item. What would you like to add?",
         )
+
+    # --- If user is browsing a category, try item match FIRST ---
+    # This prevents "Aloo Tikka Chat" from matching the "Chat" category
+    # instead of the "Aloo Tikka Chat" menu item.
+    if session.category_id:
+        cat_items = _get_all_restaurant_items(db, session.restaurant_id)
+        # Try matching within current category items first
+        current_cat_items = [i for i in cat_items if i.category_id == session.category_id]
+        parsed_in_cat = _parse_order_items(cleaned, current_cat_items)
+        if not parsed_in_cat:
+            single = _find_best_item(cleaned, current_cat_items)
+            if single:
+                parsed_in_cat = [(single, 1)]
+        if parsed_in_cat:
+            order = crud.get_user_order_for_restaurant(db, session.user_id, session.restaurant_id)
+            if not order:
+                order = crud.create_order(db, session.user_id, session.restaurant_id)
+            crud.attach_order_to_session(db, session, order)
+            added_lines, added_names = [], []
+            for menu_item, qty in parsed_in_cat:
+                crud.add_order_item(db, order, menu_item, qty)
+                price = f"${menu_item.price_cents * qty / 100:.2f}"
+                added_lines.append(f"  {qty}x {menu_item.name} - {price}")
+                added_names.append(menu_item.name)
+            crud.recompute_order_total(db, order)
+            total = f"${order.total_cents / 100:.2f}"
+            reply = "Added to your order:\n" + "\n".join(added_lines)
+            reply += f"\n\nCart total: {total}"
+            cart = _build_cart_summary_chat(db, session.user_id)
+            voice_added = ", ".join(added_names)
+            return _result(
+                reply,
+                restaurant_id=session.restaurant_id,
+                order_id=order.id,
+                cart_summary=cart,
+                voice_prompt=f"Added {voice_added}. Your total is {total}. Would you like anything else, or say done to finish?",
+            )
+        # Also try across ALL restaurant items (not just current category)
+        parsed_all = _parse_order_items(cleaned, cat_items)
+        if not parsed_all:
+            single = _find_best_item(cleaned, cat_items)
+            if single:
+                parsed_all = [(single, 1)]
+        if parsed_all:
+            order = crud.get_user_order_for_restaurant(db, session.user_id, session.restaurant_id)
+            if not order:
+                order = crud.create_order(db, session.user_id, session.restaurant_id)
+            crud.attach_order_to_session(db, session, order)
+            added_lines, added_names = [], []
+            for menu_item, qty in parsed_all:
+                crud.add_order_item(db, order, menu_item, qty)
+                price = f"${menu_item.price_cents * qty / 100:.2f}"
+                added_lines.append(f"  {qty}x {menu_item.name} - {price}")
+                added_names.append(menu_item.name)
+            crud.recompute_order_total(db, order)
+            total = f"${order.total_cents / 100:.2f}"
+            reply = "Added to your order:\n" + "\n".join(added_lines)
+            reply += f"\n\nCart total: {total}"
+            cart = _build_cart_summary_chat(db, session.user_id)
+            voice_added = ", ".join(added_names)
+            return _result(
+                reply,
+                restaurant_id=session.restaurant_id,
+                order_id=order.id,
+                cart_summary=cart,
+                voice_prompt=f"Added {voice_added}. Your total is {total}. Would you like anything else, or say done to finish?",
+            )
 
     # Also match if user just types a category name
     categories = crud.list_categories(db, session.restaurant_id)
@@ -676,6 +744,7 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             cat_match = best_cat
 
     if cat_match:
+        _set_session_state(db, session, category_id=cat_match.id)
         items = _items_data(db, cat_match.id)
         item_list = _build_voice_item_list(items)
         return _result(
