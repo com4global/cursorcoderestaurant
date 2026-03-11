@@ -380,7 +380,7 @@ export default function App() {
   const audioContextRef = useRef(null);
   const voiceAudioRef = useRef(null); // for playing TTS audio
 
-  // Speak text — use browser speechSynthesis for instant response (no network latency)
+  // Speak text — Sarvam AI Bulbul v3 TTS (primary), browser SpeechSynthesis (fallback)
   const voiceSpeak = (text, autoListenAfter = true) => {
     if (!text) return;
     // Stop any playing audio
@@ -396,17 +396,71 @@ export default function App() {
       }
     };
 
-    // Use browser speechSynthesis — instant, works on all mobile
+    // --- BACKUP: Browser SpeechSynthesis (uncomment to switch back) ---
+    // if (window.speechSynthesis) {
+    //   const u = new SpeechSynthesisUtterance(text);
+    //   u.rate = 1.05;
+    //   u.pitch = 1.0;
+    //   u.lang = "en-US";
+    //   u.onend = afterSpeak;
+    //   u.onerror = afterSpeak;
+    //   window.speechSynthesis.speak(u);
+    // } else {
+    //   afterSpeak();
+    // }
+
+    // --- PRIMARY: Sarvam AI Bulbul v3 TTS ---
+    const useSarvamTTS = async () => {
+      try {
+        const { voiceTTS } = await import("./api.js");
+        const result = await voiceTTS(text, "en-IN", "kavya");
+        if (result.audio_base64) {
+          const audioData = atob(result.audio_base64);
+          const audioArray = new Uint8Array(audioData.length);
+          for (let i = 0; i < audioData.length; i++) {
+            audioArray[i] = audioData.charCodeAt(i);
+          }
+          const blob = new Blob([audioArray], { type: "audio/wav" });
+          const url = URL.createObjectURL(blob);
+          const audio = new Audio(url);
+          voiceAudioRef.current = audio;
+          audio.onended = () => {
+            URL.revokeObjectURL(url);
+            voiceAudioRef.current = null;
+            afterSpeak();
+          };
+          audio.onerror = () => {
+            URL.revokeObjectURL(url);
+            voiceAudioRef.current = null;
+            // Fallback to browser TTS
+            fallbackBrowserTTS(text, afterSpeak);
+          };
+          audio.play().catch(() => fallbackBrowserTTS(text, afterSpeak));
+          return;
+        }
+        // No audio returned, fallback
+        fallbackBrowserTTS(text, afterSpeak);
+      } catch (err) {
+        console.warn("Sarvam TTS failed, using browser fallback:", err);
+        fallbackBrowserTTS(text, afterSpeak);
+      }
+    };
+
+    useSarvamTTS();
+  };
+
+  // Fallback: browser SpeechSynthesis (kept for reliability)
+  const fallbackBrowserTTS = (text, onDone) => {
     if (window.speechSynthesis) {
       const u = new SpeechSynthesisUtterance(text);
       u.rate = 1.05;
       u.pitch = 1.0;
       u.lang = "en-US";
-      u.onend = afterSpeak;
-      u.onerror = afterSpeak;
+      u.onend = onDone;
+      u.onerror = onDone;
       window.speechSynthesis.speak(u);
     } else {
-      afterSpeak();
+      onDone();
     }
   };
   voiceSpeakRef.current = voiceSpeak;  // Keep ref in sync
