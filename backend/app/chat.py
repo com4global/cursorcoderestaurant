@@ -264,6 +264,90 @@ def _token_match_score(query: str, item_name: str) -> float:
     return matched_tokens / len(query_tokens)
 
 
+def _llm_match_item(user_input: str, items: list[MenuItem]) -> MenuItem | None:
+    """
+    Use Sarvam AI LLM to intelligently match voice input against menu items.
+    Much more accurate than fuzzy string matching for voice transcriptions.
+    """
+    if not items or not user_input.strip():
+        return None
+
+    try:
+        from . import sarvam_service
+
+        # Build a numbered list of item names for the LLM
+        item_names = [f"{i+1}. {item.name}" for i, item in enumerate(items)]
+        item_list_str = "\n".join(item_names)
+
+        system_prompt = (
+            "You are a menu item matcher for a restaurant ordering system. "
+            "The user is ordering food via voice. Match their spoken input to the closest menu item. "
+            "Reply with ONLY the number of the matched item. If no item matches, reply with 0. "
+            "Be smart about voice transcription errors (e.g., 'chaat' = 'chat', 'briyani' = 'biryani'). "
+            "Do not explain, just reply with the number."
+        )
+
+        context = f"Available menu items:\n{item_list_str}"
+        user_msg = f"Customer said: \"{user_input}\""
+
+        result = sarvam_service.chat_completion(user_msg, system_prompt, context)
+        result = result.strip()
+
+        # Extract number from response
+        import re as _re
+        num_match = _re.search(r'\d+', result)
+        if num_match:
+            idx = int(num_match.group()) - 1  # Convert 1-indexed to 0-indexed
+            if 0 <= idx < len(items):
+                return items[idx]
+    except Exception as e:
+        # LLM failed — fall back to fuzzy matching
+        import traceback
+        traceback.print_exc()
+
+    return None
+
+
+def _llm_match_category(user_input: str, categories: list) -> object | None:
+    """
+    Use Sarvam AI LLM to intelligently match voice input against category names.
+    """
+    if not categories or not user_input.strip():
+        return None
+
+    try:
+        from . import sarvam_service
+
+        cat_names = [f"{i+1}. {cat['name'] if isinstance(cat, dict) else cat.name}" for i, cat in enumerate(categories)]
+        cat_list_str = "\n".join(cat_names)
+
+        system_prompt = (
+            "You are a category matcher for a restaurant ordering system. "
+            "The user is browsing categories via voice. Match their spoken input to the closest category. "
+            "Reply with ONLY the number of the matched category. If no category matches, reply with 0. "
+            "Be smart about voice transcription errors. "
+            "Do not explain, just reply with the number."
+        )
+
+        context = f"Available categories:\n{cat_list_str}"
+        user_msg = f"Customer said: \"{user_input}\""
+
+        result = sarvam_service.chat_completion(user_msg, system_prompt, context)
+        result = result.strip()
+
+        import re as _re
+        num_match = _re.search(r'\d+', result)
+        if num_match:
+            idx = int(num_match.group()) - 1
+            if 0 <= idx < len(categories):
+                return categories[idx]
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+
+    return None
+
+
 def _compute_item_score(query: str, item: MenuItem) -> float:
     """Compute a combined score for an item match using multiple strategies."""
     query_lower = query.lower().strip()
@@ -631,18 +715,23 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             voice_prompt="I couldn't find that item. What would you like to add?",
         )
 
-    # --- Smart matching: try items FIRST when browsing a category or multi-word input ---
-    # This prevents "Aloo Tikka Chat" from matching the "Chat" category
-    # instead of the menu item "Aloo Tikka Chat"
+    # --- Smart matching: try items FIRST, then categories ---
+    # Uses Sarvam AI LLM as fallback when fuzzy matching isn't confident
     all_items = _get_all_restaurant_items(db, session.restaurant_id)
     input_words = lower.split()
 
-    # Try item matching first (before category matching)
+    # Step 1: Try fuzzy item matching first
     item_parsed = _parse_order_items(cleaned, all_items)
     if not item_parsed:
         single = _find_best_item(cleaned, all_items)
         if single:
             item_parsed = [(single, 1)]
+
+    # Step 2: If fuzzy didn't match, ask Sarvam AI LLM to match
+    if not item_parsed and len(input_words) >= 2:
+        llm_item = _llm_match_item(cleaned, all_items)
+        if llm_item:
+            item_parsed = [(llm_item, 1)]
 
     if item_parsed:
         # Found an item match — add to cart
@@ -670,24 +759,7 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             voice_prompt=f"Added {voice_added}. Your total is {total}. Would you like anything else, or say done to finish?",
         )
 
-    # If no exact item match but multi-word input, try disambiguation before category matching
-    if len(input_words) >= 2:
-        matches = _find_matching_items(cleaned, all_items)
-        if matches:
-            items_data = [
-                {"id": m.id, "name": m.name, "description": m.description or "", "price_cents": m.price_cents}
-                for m in matches
-            ]
-            match_names = ", ".join(m.name for m in matches[:3])
-            return _result(
-                f'Found {len(matches)} items matching "{cleaned}". Tap + to add!',
-                restaurant_id=session.restaurant_id,
-                order_id=session.order_id,
-                items=items_data,
-                voice_prompt=f"Did you mean: {match_names}? Please say the exact item name.",
-            )
-
-    # Also match if user just types a category name
+    # --- Category matching (only if item didn't match) ---
     categories = crud.list_categories(db, session.restaurant_id)
     cat_match = None
 
@@ -744,6 +816,22 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             items=items,
             voice_prompt=f"In {cat_match.name} we have: {item_list}. Which one would you like?",
         )
+
+    # Fuzzy category match failed — try LLM category matching
+    if not cat_match:
+        llm_cat = _llm_match_category(cleaned, categories)
+        if llm_cat:
+            _set_session_state(db, session, category_id=llm_cat.id)
+            items = _items_data(db, llm_cat.id)
+            item_list = _build_voice_item_list(items)
+            return _result(
+                f"{llm_cat.name} — {len(items)} items. Tap + to add or just tell me what you want!",
+                restaurant_id=session.restaurant_id,
+                category_id=llm_cat.id,
+                order_id=session.order_id,
+                items=items,
+                voice_prompt=f"In {llm_cat.name} we have: {item_list}. Which one would you like?",
+            )
 
     # --- Show menu / categories ---
     if lower in ("menu", "show menu", "categories", "show categories", "what do you have"):
