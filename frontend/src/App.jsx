@@ -379,6 +379,9 @@ export default function App() {
   const audioChunksRef = useRef([]);
   const audioContextRef = useRef(null);
   const voiceAudioRef = useRef(null); // for playing TTS audio
+  const ttsAudioElRef = useRef(null); // persistent <audio> element for iOS
+  // Tiny silent WAV to 'warm up' audio element on user gesture (iOS requirement)
+  const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
 
   // Speak text — Sarvam AI Bulbul v3 TTS (primary), browser SpeechSynthesis (fallback)
   const voiceSpeak = (text, autoListenAfter = true) => {
@@ -421,28 +424,22 @@ export default function App() {
     const useSarvamTTS = async () => {
       try {
         const result = await voiceTTS(text, "en-IN", "kavya");
-        if (ttsCompleted) return; // Safety timer already fired
+        if (ttsCompleted) return;
         if (result.audio_base64) {
+          clearTimeout(safetyTimer);
           const binaryStr = atob(result.audio_base64);
           const bytes = new Uint8Array(binaryStr.length);
-          for (let i = 0; i < binaryStr.length; i++) {
-            bytes[i] = binaryStr.charCodeAt(i);
-          }
+          for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+          const blob = new Blob([bytes], { type: "audio/wav" });
+          const blobUrl = URL.createObjectURL(blob);
 
-          // Reuse AudioContext created at mic button tap
-          const ctx = audioContextRef.current;
-          if (!ctx) { clearTimeout(safetyTimer); fallbackBrowserTTS(text, safeAfterSpeak); return; }
-          if (ctx.state === "suspended") await ctx.resume();
-
-          const audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
-          if (ttsCompleted) return;
-          clearTimeout(safetyTimer);
-          const source = ctx.createBufferSource();
-          source.buffer = audioBuffer;
-          source.connect(ctx.destination);
-          source.onended = safeAfterSpeak;
-          source.start(0);
-          voiceAudioRef.current = { pause: () => { try { source.stop(); } catch (e) { } } };
+          // Use the warmed-up <audio> element (unlocked at mic tap for iOS)
+          const el = ttsAudioElRef.current;
+          if (!el) { URL.revokeObjectURL(blobUrl); fallbackBrowserTTS(text, safeAfterSpeak); return; }
+          el.onended = () => { URL.revokeObjectURL(blobUrl); safeAfterSpeak(); };
+          el.onerror = () => { URL.revokeObjectURL(blobUrl); fallbackBrowserTTS(text, safeAfterSpeak); };
+          el.src = blobUrl;
+          el.play().catch(() => { URL.revokeObjectURL(blobUrl); fallbackBrowserTTS(text, safeAfterSpeak); });
           return;
         }
         clearTimeout(safetyTimer);
@@ -549,14 +546,14 @@ export default function App() {
     } else {
       voiceModeRef.current = true;
       setVoiceMode(true);
-      // Create AudioContext NOW on user gesture (mic button tap)
-      // This unlocks audio playback for Sarvam TTS later
-      if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      // Warm up <audio> element NOW on user gesture (iOS requires this)
+      if (!ttsAudioElRef.current) {
+        ttsAudioElRef.current = new Audio();
+        ttsAudioElRef.current.volume = 1.0;
       }
-      if (audioContextRef.current.state === "suspended") {
-        audioContextRef.current.resume();
-      }
+      // Play silent WAV to unlock audio on iOS Safari
+      ttsAudioElRef.current.src = SILENT_WAV;
+      ttsAudioElRef.current.play().catch(() => { });
       // Short initial prompt based on current state
       let prompt;
       if (!selectedRestaurant) prompt = "Which restaurant would you like?";
