@@ -1232,6 +1232,7 @@ async def extract_menu_from_file(
     # Validate file type
     import os
     ext = os.path.splitext(file.filename or "")[1].lower()
+    print(f"[MenuExtract] Received file: {file.filename} (ext={ext}) for restaurant {restaurant_id}")
     if ext not in ALLOWED_ALL_EXTS:
         raise HTTPException(
             status_code=400,
@@ -1240,6 +1241,7 @@ async def extract_menu_from_file(
 
     # Read file bytes
     file_bytes = await file.read()
+    print(f"[MenuExtract] File size: {len(file_bytes)} bytes ({len(file_bytes)/1024/1024:.1f}MB)")
     if len(file_bytes) > 20 * 1024 * 1024:  # 20MB limit
         raise HTTPException(status_code=400, detail="File too large. Max 20MB.")
 
@@ -1252,8 +1254,10 @@ async def extract_menu_from_file(
             from .menu_extractor import extract_menu_from_document
             menu_data = extract_menu_from_document(file_bytes, file.filename or "menu.pdf")
     except ValueError as e:
+        print(f"[MenuExtract] Extraction error: {e}")
         raise HTTPException(status_code=422, detail=str(e))
 
+    print(f"[MenuExtract] Success: {sum(len(c.get('items', [])) for c in menu_data.get('categories', []))} items extracted")
     return menu_data
 
 

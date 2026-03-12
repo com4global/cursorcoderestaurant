@@ -394,9 +394,61 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
         });
     }
 
+    // --- Compress image to fit within server limits ---
+    async function compressImage(file, maxSizeMB = 2) {
+        const imageExts = [".jpg", ".jpeg", ".png", ".webp"];
+        const ext = "." + file.name.split(".").pop().toLowerCase();
+        if (!imageExts.includes(ext)) return file; // skip non-images
+        if (file.size <= maxSizeMB * 1024 * 1024) return file; // already small enough
+
+        return new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const img = new Image();
+                img.onload = () => {
+                    const canvas = document.createElement("canvas");
+                    // Scale down large images — cap at 2000px on longest side
+                    let { width, height } = img;
+                    const maxDim = 2000;
+                    if (width > maxDim || height > maxDim) {
+                        const ratio = Math.min(maxDim / width, maxDim / height);
+                        width = Math.round(width * ratio);
+                        height = Math.round(height * ratio);
+                    }
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext("2d");
+                    ctx.drawImage(img, 0, 0, width, height);
+                    canvas.toBlob(
+                        (blob) => {
+                            if (blob) {
+                                const compressed = new File([blob], file.name, { type: "image/jpeg" });
+                                console.log(`[Extract] Compressed ${(file.size / 1024 / 1024).toFixed(1)}MB → ${(compressed.size / 1024 / 1024).toFixed(1)}MB`);
+                                resolve(compressed);
+                            } else {
+                                resolve(file);
+                            }
+                        },
+                        "image/jpeg",
+                        0.8
+                    );
+                };
+                img.onerror = () => resolve(file);
+                img.src = e.target.result;
+            };
+            reader.onerror = () => resolve(file);
+            reader.readAsDataURL(file);
+        });
+    }
+
     // --- Extract from image file ---
-    async function handleExtractFromFile(file) {
-        if (!file || !importRestId) return;
+    async function handleExtractFromFile(file, restaurantId) {
+        if (!file) return;
+        const restId = restaurantId || importRestId;
+        if (!restId) {
+            setImportError("No restaurant selected. Please go back and select a restaurant.");
+            return;
+        }
         const allowed = [".jpg", ".jpeg", ".png", ".webp", ".pdf", ".docx", ".doc", ".xlsx", ".xls"];
         const ext = "." + file.name.split(".").pop().toLowerCase();
         if (!allowed.includes(ext)) {
@@ -411,7 +463,16 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
         setImportError("");
         setImportedMenu(null);
         try {
-            const data = await extractMenuFromFile(token, importRestId, file);
+            // Compress large images to avoid server body size limits
+            const uploadFile = await compressImage(file);
+            console.log(`[Extract] Uploading ${uploadFile.name} (${(uploadFile.size / 1024).toFixed(0)}KB) to restaurant ${restId}`);
+            const data = await extractMenuFromFile(token, restId, uploadFile);
+            console.log("[Extract] Response:", data);
+            if (data.error) {
+                setImportError(data.error);
+                setImportLoading(false);
+                return;
+            }
             if (data.categories) {
                 data.categories = data.categories
                     .filter(c => c.items && c.items.length > 0)
@@ -423,9 +484,22 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                         }))
                     }));
             }
+            if (!data.categories || data.categories.length === 0) {
+                setImportError("No menu items found in the image. Try a clearer or higher-resolution photo.");
+                setImportLoading(false);
+                return;
+            }
             setImportedMenu(data);
         } catch (err) {
-            setImportError(err.message || "Extraction failed. Try a clearer photo.");
+            console.error("[Extract] Upload failed:", err);
+            const msg = err.message || "";
+            if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("Load failed")) {
+                setImportError("Network error — could not reach the server. Check your connection and try again.");
+            } else if (msg.includes("413") || msg.includes("too large") || msg.includes("payload")) {
+                setImportError("Image too large for the server. Try a smaller or lower-resolution photo.");
+            } else {
+                setImportError(msg || "Extraction failed. Try a clearer photo.");
+            }
         }
         setImportLoading(false);
     }
@@ -991,7 +1065,7 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                                     onDrop={(e) => {
                                                         e.preventDefault();
                                                         setDragActive(false);
-                                                        if (e.dataTransfer.files[0]) handleExtractFromFile(e.dataTransfer.files[0]);
+                                                        if (e.dataTransfer.files[0]) handleExtractFromFile(e.dataTransfer.files[0], r.id);
                                                     }}
                                                     onClick={() => document.getElementById(`file-input-${r.id}`).click()}
                                                 >
@@ -1000,7 +1074,7 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                                         type="file"
                                                         accept=".jpg,.jpeg,.png,.webp"
                                                         style={{ display: 'none' }}
-                                                        onChange={(e) => { if (e.target.files[0]) handleExtractFromFile(e.target.files[0]); }}
+                                                        onChange={(e) => { if (e.target.files[0]) handleExtractFromFile(e.target.files[0], r.id); }}
                                                     />
                                                     {importLoading ? (
                                                         <div className="extract-loading">
@@ -1035,7 +1109,7 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                                     onDrop={(e) => {
                                                         e.preventDefault();
                                                         setDragActive(false);
-                                                        if (e.dataTransfer.files[0]) handleExtractFromFile(e.dataTransfer.files[0]);
+                                                        if (e.dataTransfer.files[0]) handleExtractFromFile(e.dataTransfer.files[0], r.id);
                                                     }}
                                                     onClick={() => document.getElementById(`doc-input-${r.id}`).click()}
                                                 >
@@ -1044,7 +1118,7 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                                         type="file"
                                                         accept=".pdf,.docx,.doc,.xlsx,.xls"
                                                         style={{ display: 'none' }}
-                                                        onChange={(e) => { if (e.target.files[0]) handleExtractFromFile(e.target.files[0]); }}
+                                                        onChange={(e) => { if (e.target.files[0]) handleExtractFromFile(e.target.files[0], r.id); }}
                                                     />
                                                     {importLoading ? (
                                                         <div className="extract-loading">
@@ -1209,8 +1283,8 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                 </div>
             </div>
 
-            {/* AI Menu Import Modal Overlay */}
-            {importRestId && (
+            {/* AI Menu Import Modal Overlay — only show when NOT on Extract tab */}
+            {importRestId && !Object.values(activeTab).includes("extract") && (
                 <div className="owner-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setImportRestId(null); }}>
                     <div className="owner-modal">
                         {/* Scrollable body */}

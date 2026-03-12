@@ -63,7 +63,7 @@ def extract_menu_from_image(image_bytes: bytes, filename: str = "menu.jpg") -> d
     Returns:
         Structured menu dict: {restaurant_name, categories: [{name, items}]}
     """
-    load_dotenv()
+    load_dotenv(override=True)
 
     # Determine MIME type
     ext = os.path.splitext(filename)[1].lower()
@@ -296,7 +296,7 @@ def extract_menu_from_document(file_bytes: bytes, filename: str = "menu.pdf") ->
     Returns:
         Structured menu dict: {restaurant_name, categories: [{name, items}]}
     """
-    load_dotenv()
+    load_dotenv(override=True)
 
     ext = os.path.splitext(filename)[1].lower()
     doc_type = DOCUMENT_MIME_MAP.get(ext)
