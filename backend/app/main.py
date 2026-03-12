@@ -8,7 +8,7 @@ import urllib.parse
 
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, File, status
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -1203,8 +1203,53 @@ def get_me(current_user=Depends(get_current_user)):
 
 
 # =============================================================
-# AI Menu Extraction (Phase 3 integrated into Phase 2)
+# AI Menu Extraction
 # =============================================================
+
+ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+@app.post("/owner/restaurants/{restaurant_id}/extract-menu-file")
+async def extract_menu_from_file(
+    restaurant_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Upload an image of a menu and extract items using AI Vision."""
+    if current_user.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Not a restaurant owner")
+
+    r = db.query(models.Restaurant).filter(
+        models.Restaurant.id == restaurant_id,
+        models.Restaurant.owner_id == current_user.id,
+    ).first()
+    if not r:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+
+    # Validate file type
+    import os
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in ALLOWED_IMAGE_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(ALLOWED_IMAGE_EXTS)}"
+        )
+
+    # Read file bytes
+    image_bytes = await file.read()
+    if len(image_bytes) > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=400, detail="File too large. Max 10MB.")
+
+    # Extract menu
+    from .menu_extractor import extract_menu_from_image
+    try:
+        menu_data = extract_menu_from_image(image_bytes, file.filename or "menu.jpg")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    return menu_data
+
 
 @app.post("/owner/import-menu")
 def import_menu_from_url(
