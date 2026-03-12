@@ -83,3 +83,4 @@ Wav2Lip/
 # ============================
 .netlify
 .vercel
+frontend/src-tauri/gen/
