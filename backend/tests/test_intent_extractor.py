@@ -683,6 +683,77 @@ class TestMealPlanner:
         assert r.meal_plan_mode is True
         assert r.variety_required is True
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 🛡 EDGE CASES & REGRESSION (15 tests)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestEdgeCases:
+    """Edge cases that should not crash the intent extractor."""
+
+    def test_empty_string(self):
+        r = intent("")
+        assert r.has_search_criteria() is False
+
+    def test_whitespace_only(self):
+        r = intent("   ")
+        assert r.has_search_criteria() is False
+
+    def test_single_char(self):
+        r = intent("x")
+        assert r is not None  # Should not crash
+
+    def test_emoji_only(self):
+        r = intent("🍕🍔🌮")
+        assert r is not None  # Should not crash
+
+    def test_very_long_query(self):
+        long_text = "I want pizza " * 100  # 1300 chars
+        r = intent(long_text)
+        assert "pizza" in r.dish_name
+
+    def test_special_characters(self):
+        r = intent("pizza @#$%^&*()")
+        assert r is not None
+
+    def test_numbers_only(self):
+        r = intent("12345")
+        assert r is not None
+
+    def test_html_injection(self):
+        r = intent("<script>alert('xss')</script>")
+        assert r is not None
+
+    def test_sql_injection_attempt(self):
+        r = intent("'; DROP TABLE users; --")
+        assert r is not None
+
+    def test_mixed_case(self):
+        r = intent("CHICKEN BIRYANI")
+        assert r.protein_type == "chicken"
+
+    def test_extra_whitespace(self):
+        r = intent("  I   want   pizza   ")
+        assert r.dish_name == "pizza"
+
+    def test_ambiguous_multi_intent(self):
+        """Query that could be both a dish search AND a recommendation."""
+        r = intent("suggest the best biryani under $15")
+        assert r.recommendation_mode is True or r.dish_name is not None
+
+    def test_price_without_dollar(self):
+        r = intent("pizza under 10")
+        assert r.dish_name == "pizza"
+        # May or may not extract price without $ — just shouldn't crash
+
+    def test_budget_with_comma(self):
+        r = intent("food for 5 under $1,000")
+        assert r is not None
+
+    def test_mixed_language_hint(self):
+        """Hindi-English mix: 'mujhe biryani chahiye'."""
+        r = intent("mujhe biryani chahiye")
+        assert r.dish_name is not None and "biryani" in r.dish_name
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Run
@@ -690,3 +761,4 @@ class TestMealPlanner:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+

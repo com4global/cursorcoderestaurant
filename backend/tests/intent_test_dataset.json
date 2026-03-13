@@ -1,0 +1,390 @@
+[
+    {
+        "id": "basic_001",
+        "input": "I want pizza",
+        "expected": {
+            "dish_name": "pizza"
+        }
+    },
+    {
+        "id": "basic_002",
+        "input": "Show me burgers near me",
+        "expected": {
+            "dish_name": "burgers"
+        }
+    },
+    {
+        "id": "basic_003",
+        "input": "Order ramen",
+        "expected": {
+            "dish_name": "ramen"
+        }
+    },
+    {
+        "id": "basic_004",
+        "input": "Find tacos nearby",
+        "expected": {
+            "dish_name": "tacos"
+        }
+    },
+    {
+        "id": "basic_005",
+        "input": "I feel like eating pasta",
+        "expected": {
+            "dish_name": "pasta"
+        }
+    },
+    {
+        "id": "price_001",
+        "input": "cheap tacos under $10",
+        "expected": {
+            "dish_name": "tacos",
+            "price_max": 10
+        }
+    },
+    {
+        "id": "price_002",
+        "input": "pizza less than $15",
+        "expected": {
+            "dish_name": "pizza",
+            "price_max": 15
+        }
+    },
+    {
+        "id": "price_003",
+        "input": "biryani under $20",
+        "expected": {
+            "dish_name": "biryani",
+            "price_max": 20
+        }
+    },
+    {
+        "id": "price_004",
+        "input": "sushi below $30",
+        "expected": {
+            "dish_name": "sushi",
+            "price_max": 30
+        }
+    },
+    {
+        "id": "price_005",
+        "input": "noodles for under $8",
+        "expected": {
+            "dish_name": "noodles",
+            "price_max": 8
+        }
+    },
+    {
+        "id": "budget_001",
+        "input": "feed 4 people under $40",
+        "expected": {
+            "people_count": 4,
+            "budget_total": 40
+        }
+    },
+    {
+        "id": "budget_002",
+        "input": "food for 2 under $25",
+        "expected": {
+            "people_count": 2,
+            "price_max": 25
+        }
+    },
+    {
+        "id": "budget_003",
+        "input": "dinner for 6 people budget $80",
+        "expected": {
+            "people_count": 6,
+            "price_max": 80
+        }
+    },
+    {
+        "id": "budget_004",
+        "input": "lunch for 3 under $30",
+        "expected": {
+            "people_count": 3,
+            "price_max": 30
+        }
+    },
+    {
+        "id": "budget_005",
+        "input": "party food for 10 people under $100",
+        "expected": {
+            "people_count": 10,
+            "budget_total": 100
+        }
+    },
+    {
+        "id": "cuisine_001",
+        "input": "Chinese food near me",
+        "expected": {
+            "cuisine": "Chinese"
+        }
+    },
+    {
+        "id": "cuisine_002",
+        "input": "I want Indian food",
+        "expected": {
+            "cuisine": "Indian"
+        }
+    },
+    {
+        "id": "cuisine_003",
+        "input": "Thai cuisine please",
+        "expected": {
+            "cuisine": "Thai"
+        }
+    },
+    {
+        "id": "cuisine_004",
+        "input": "Mexican food under $15",
+        "expected": {
+            "cuisine": "Mexican",
+            "price_max": 15
+        }
+    },
+    {
+        "id": "cuisine_005",
+        "input": "Japanese food for 2",
+        "expected": {
+            "cuisine": "Japanese",
+            "people_count": 2
+        }
+    },
+    {
+        "id": "diet_001",
+        "input": "vegetarian options",
+        "expected": {
+            "diet_type": "vegetarian"
+        }
+    },
+    {
+        "id": "diet_002",
+        "input": "vegan pizza",
+        "expected": {
+            "diet_type": "vegan",
+            "dish_name": "pizza"
+        }
+    },
+    {
+        "id": "diet_003",
+        "input": "gluten-free pasta",
+        "expected": {
+            "diet_type": "gluten-free",
+            "dish_name": "pasta"
+        }
+    },
+    {
+        "id": "diet_004",
+        "input": "keto friendly food",
+        "expected": {
+            "diet_type": "keto"
+        }
+    },
+    {
+        "id": "diet_005",
+        "input": "vegetarian Chinese food near me",
+        "expected": {
+            "cuisine": "Chinese",
+            "diet_type": "vegetarian"
+        }
+    },
+    {
+        "id": "protein_001",
+        "input": "chicken biryani",
+        "expected": {
+            "protein_type": "chicken",
+            "dish_name": "biryani"
+        }
+    },
+    {
+        "id": "protein_002",
+        "input": "lamb kebab under $18",
+        "expected": {
+            "protein_type": "lamb",
+            "dish_name": "kebab",
+            "price_max": 18
+        }
+    },
+    {
+        "id": "protein_003",
+        "input": "beef tacos",
+        "expected": {
+            "protein_type": "beef",
+            "dish_name": "tacos"
+        }
+    },
+    {
+        "id": "protein_004",
+        "input": "fish curry",
+        "expected": {
+            "protein_type": "fish",
+            "dish_name": "curry"
+        }
+    },
+    {
+        "id": "protein_005",
+        "input": "shrimp fried rice",
+        "expected": {
+            "protein_type": "shrimp"
+        }
+    },
+    {
+        "id": "spice_001",
+        "input": "spicy chicken wings",
+        "expected": {
+            "spice_level": "spicy"
+        }
+    },
+    {
+        "id": "spice_002",
+        "input": "mild curry",
+        "expected": {
+            "spice_level": "mild"
+        }
+    },
+    {
+        "id": "spice_003",
+        "input": "extra hot pizza",
+        "expected": {
+            "spice_level": "spicy"
+        }
+    },
+    {
+        "id": "combo_001",
+        "input": "cheap spicy vegetarian Indian food",
+        "expected": {
+            "cuisine": "Indian",
+            "diet_type": "vegetarian",
+            "spice_level": "spicy"
+        }
+    },
+    {
+        "id": "combo_002",
+        "input": "chicken biryani under $12 for 2 people",
+        "expected": {
+            "protein_type": "chicken",
+            "dish_name": "biryani",
+            "price_max": 12,
+            "people_count": 2
+        }
+    },
+    {
+        "id": "combo_003",
+        "input": "vegan Thai food under $20",
+        "expected": {
+            "cuisine": "Thai",
+            "diet_type": "vegan",
+            "price_max": 20
+        }
+    },
+    {
+        "id": "reco_001",
+        "input": "what should I eat",
+        "expected": {
+            "recommendation_mode": true
+        }
+    },
+    {
+        "id": "reco_002",
+        "input": "suggest something good",
+        "expected": {
+            "recommendation_mode": true
+        }
+    },
+    {
+        "id": "reco_003",
+        "input": "I'm hungry, surprise me",
+        "expected": {
+            "recommendation_mode": true
+        }
+    },
+    {
+        "id": "reco_004",
+        "input": "recommend something spicy",
+        "expected": {
+            "recommendation_mode": true,
+            "spice_level": "spicy"
+        }
+    },
+    {
+        "id": "meal_001",
+        "input": "plan my meals for the week under $120",
+        "expected": {
+            "meal_plan_mode": true,
+            "plan_days": 5
+        }
+    },
+    {
+        "id": "meal_002",
+        "input": "weekly meal plan under $80",
+        "expected": {
+            "meal_plan_mode": true,
+            "plan_days": 5
+        }
+    },
+    {
+        "id": "meal_003",
+        "input": "5 day meal plan",
+        "expected": {
+            "meal_plan_mode": true,
+            "plan_days": 5
+        }
+    },
+    {
+        "id": "meal_004",
+        "input": "3 day meal plan under $50",
+        "expected": {
+            "meal_plan_mode": true,
+            "plan_days": 3
+        }
+    },
+    {
+        "id": "meal_005",
+        "input": "create meal plan for full week",
+        "expected": {
+            "meal_plan_mode": true,
+            "plan_days": 7
+        }
+    },
+    {
+        "id": "meal_006",
+        "input": "vegetarian meal plan for 3 days",
+        "expected": {
+            "meal_plan_mode": true,
+            "plan_days": 3,
+            "diet_type": "vegetarian"
+        }
+    },
+    {
+        "id": "meal_007",
+        "input": "healthy lunch plan for 5 days",
+        "expected": {
+            "meal_plan_mode": true,
+            "plan_days": 5,
+            "diet_type": "healthy"
+        }
+    },
+    {
+        "id": "meal_008",
+        "input": "generate meal plan budget $100",
+        "expected": {
+            "meal_plan_mode": true
+        }
+    },
+    {
+        "id": "meal_009",
+        "input": "build a meal plan for 4 days",
+        "expected": {
+            "meal_plan_mode": true,
+            "plan_days": 4
+        }
+    },
+    {
+        "id": "meal_010",
+        "input": "daily meal plan under $20",
+        "expected": {
+            "meal_plan_mode": true
+        }
+    }
+]
