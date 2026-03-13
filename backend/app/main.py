@@ -679,8 +679,10 @@ def generate_meal_plan(req: MealPlanRequest, db: Session = Depends(get_db)):
 
     # Query all available items (real meals only, min $5)
     EXCLUDE_KEYWORDS = {"water", "soda", "coke", "pepsi", "sprite", "fanta", "juice",
+                         "milkshake", "shake", "smoothie", "lassi", "tea", "coffee", "lemonade", "chaas", "buttermilk",
                          "naan", "pav", "rice", "roti", "bread", "raita", "sauce",
-                         "extra", "add-on", "utensil", "cutlery", "napkin"}
+                         "chutney", "pickle", "papad", "pappadam", "sambar",
+                         "extra", "add-on", "utensil", "cutlery", "napkin", "ice cream", "dessert"}
     min_price = 500  # $5.00 minimum for actual meals
     rows = (
         db.query(models.MenuItem, models.Restaurant)

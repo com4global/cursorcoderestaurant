@@ -524,9 +524,9 @@ export default function App() {
     // "i dont know what to eat", "feed 5 people under $50", etc.
     const skipIntentSearch = trimmed.startsWith("#") || trimmed.startsWith("add:") || trimmed.length <= 2;
 
-    // ── Meal Plan Detection ─────────────────────────────────────────────
-    const mealPlanRegex = /(?:plan|create|make|generate|build)\s+(?:my\s+)?(?:meal|food|dinner|lunch)s?|(?:weekly|daily|\d+\s*day)\s+(?:meal|food|dinner|lunch)\s*plan|meal\s*plan/i;
-    if (!selectedRestaurant && !skipIntentSearch && mealPlanRegex.test(trimmed)) {
+    // ── Meal Plan Detection (works from ANY context) ──────────────────
+    const mealPlanRegex = /(?:plan|create|make|generate|build)\s+(?:my\s+|a\s+)?(?:meal|food|dinner|lunch)s?\s*(?:plan)?|(?:weekly|daily|\d+\s*day)\s+(?:meal|food|dinner|lunch)\s*plan|meal\s*plan|(?:healthy|vegetarian|vegan|keto)\s+(?:meal|food|dinner|lunch)\s*plan|(?:dinner|lunch|breakfast|food)\s+plan/i;
+    if (!skipIntentSearch && mealPlanRegex.test(trimmed)) {
       try {
         const data = await generateMealPlan(trimmed);
         if (data.days && data.days.length > 0) {
