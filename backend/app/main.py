@@ -542,6 +542,32 @@ def search_by_intent(req: IntentSearchRequest, db: Session = Depends(get_db)):
 
     results = [_to_comparison_item(item, rest) for item, rest in rows[:15]]
     display_query = _build_display_query(intent)
+
+    # --- Fallback: if 0 results, return popular items instead of empty ---
+    if not results:
+        fallback_q = (
+            db.query(models.MenuItem, models.Restaurant)
+            .join(models.MenuCategory, models.MenuItem.category_id == models.MenuCategory.id)
+            .join(models.Restaurant, models.MenuCategory.restaurant_id == models.Restaurant.id)
+            .filter(models.MenuItem.is_available.is_(True))
+            .filter(models.Restaurant.is_active.is_(True))
+            .filter(models.MenuItem.price_cents > 0)
+            .filter(models.MenuItem.price_cents >= 500)
+            .filter(models.MenuItem.price_cents <= 3000)
+            .order_by(models.MenuItem.price_cents.asc())
+            .all()
+        )
+        seen_fb: set[int] = set()
+        for item, restaurant in fallback_q:
+            if restaurant.id in seen_fb:
+                continue
+            seen_fb.add(restaurant.id)
+            results.append(_to_comparison_item(item, restaurant))
+            if len(results) >= 10:
+                break
+        fallback_label = f"🔍 No exact match for \"{intent.dish_name or text}\" — here are popular picks"
+        display_query = fallback_label
+
     best_value = results[0] if results else None
 
     return schemas.PriceComparisonResponse(

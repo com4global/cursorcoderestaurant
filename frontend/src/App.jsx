@@ -535,7 +535,22 @@ export default function App() {
           setStatus("Ready.");
           return;
         }
-      } catch (err) { /* fall through to normal chat */ }
+        // Backend returned 0 results (shouldn't happen with fallback, but just in case)
+        setMessages((p) => [...p, {
+          role: "bot",
+          content: "I couldn't find anything matching that. Try asking for a dish name, cuisine, or say \"suggest something\"!",
+        }]);
+        setStatus("Ready.");
+        return;
+      } catch (err) {
+        // Network/API error — show friendly message, don't fall through to old chat
+        setMessages((p) => [...p, {
+          role: "bot",
+          content: "Sorry, I had trouble processing that. Try again or ask for a specific dish like \"pizza\" or \"biryani\"!",
+        }]);
+        setStatus("Ready.");
+        return;
+      }
     }
 
     // If restaurant IS selected, allow explicit price comparison keywords
