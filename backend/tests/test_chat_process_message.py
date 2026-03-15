@@ -155,3 +155,53 @@ class TestResetStartOver:
         assert "reset" in resp.json()["reply"].lower() or "pick a restaurant" in resp.json()["reply"].lower()
         cart = client.get("/cart", headers=get_auth_header(token)).json()
         assert cart["grand_total_cents"] == 0
+
+
+class TestGroupOrderIntent:
+    """Group order intent returns open_group_tab and Group Order message."""
+
+    def test_group_order_phrase_returns_open_group_tab(self, client):
+        token = _user_token(client, "group_intent1@test.com")
+        resp = client.post(
+            "/chat/message",
+            json={"text": "I want to start a group order", "session_id": None},
+            headers=get_auth_header(token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("open_group_tab") is True
+        assert "group order" in data["reply"].lower() or "Group Order" in data["reply"]
+
+    def test_find_food_for_n_people_returns_open_group_tab(self, client):
+        token = _user_token(client, "group_intent2@test.com")
+        resp = client.post(
+            "/chat/message",
+            json={"text": "Find food for 4 people", "session_id": None},
+            headers=get_auth_header(token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("open_group_tab") is True
+        assert "group" in data["reply"].lower()
+
+    def test_office_lunch_returns_open_group_tab(self, client):
+        token = _user_token(client, "group_intent3@test.com")
+        resp = client.post(
+            "/chat/message",
+            json={"text": "We need office lunch for the team", "session_id": None},
+            headers=get_auth_header(token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("open_group_tab") is True
+
+    def test_regular_message_does_not_return_open_group_tab(self, client):
+        token = _user_token(client, "group_intent4@test.com")
+        resp = client.post(
+            "/chat/message",
+            json={"text": "I want biryani", "session_id": None},
+            headers=get_auth_header(token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("open_group_tab") is not True

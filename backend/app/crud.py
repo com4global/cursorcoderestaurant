@@ -7,6 +7,8 @@ from .auth import hash_password
 from .models import (
     ChatMessage,
     ChatSession,
+    GroupOrderMember,
+    GroupOrderSession,
     MenuCategory,
     MenuItem,
     Order,
@@ -398,3 +400,77 @@ def list_complaints_for_restaurant(db: Session, restaurant_id: int, limit: int =
             "order_items_summary": ", ".join(items),
         })
     return out
+
+
+# --- Group Ordering ---
+
+def _generate_share_code() -> str:
+    """Generate a short numeric share code (e.g. 8734)."""
+    import random
+    return str(random.randint(1000, 99999))
+
+
+def create_group_order_session(
+    db: Session,
+    creator_user_id: int | None = None,
+    delivery_zipcode: str | None = None,
+) -> GroupOrderSession:
+    """Create a new group order session with a unique share code."""
+    for _ in range(20):
+        share_code = _generate_share_code()
+        if not db.query(GroupOrderSession).filter(GroupOrderSession.share_code == share_code).first():
+            break
+    else:
+        share_code = _generate_share_code() + str(creator_user_id or 0)  # fallback
+    session = GroupOrderSession(
+        share_code=share_code,
+        creator_user_id=creator_user_id,
+        delivery_address_zipcode=delivery_zipcode,
+        status="active",
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+def get_group_session_by_id(db: Session, group_id: int) -> GroupOrderSession | None:
+    return db.query(GroupOrderSession).filter(GroupOrderSession.id == group_id).first()
+
+
+def get_group_session_by_share_code(db: Session, share_code: str) -> GroupOrderSession | None:
+    return db.query(GroupOrderSession).filter(GroupOrderSession.share_code == share_code).first()
+
+
+def get_group_session_by_id_or_code(db: Session, group_id_or_code: str) -> GroupOrderSession | None:
+    """Resolve by share_code first (e.g. 8734), then by numeric id (small ids like 1, 2)."""
+    # Share codes are typically 4-5 digits; try as share_code first so /group/8734 works
+    by_code = get_group_session_by_share_code(db, group_id_or_code)
+    if by_code:
+        return by_code
+    if group_id_or_code.isdigit():
+        return get_group_session_by_id(db, int(group_id_or_code))
+    return None
+
+
+def add_group_member(
+    db: Session,
+    group_session_id: int,
+    name: str,
+    preference: str | None = None,
+    budget_cents: int | None = None,
+    dietary_restrictions: str | None = None,
+    user_id: int | None = None,
+) -> GroupOrderMember:
+    member = GroupOrderMember(
+        group_session_id=group_session_id,
+        name=name,
+        preference=preference,
+        budget_cents=budget_cents,
+        dietary_restrictions=dietary_restrictions,
+        user_id=user_id,
+    )
+    db.add(member)
+    db.commit()
+    db.refresh(member)
+    return member

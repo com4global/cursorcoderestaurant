@@ -23,6 +23,7 @@ export default defineConfig({
       "/cart": "http://127.0.0.1:8000",
       "/checkout": "http://127.0.0.1:8000",
       "/ai": "http://127.0.0.1:8000",
+      "/group": "http://127.0.0.1:8000",
     },
   },
 });
