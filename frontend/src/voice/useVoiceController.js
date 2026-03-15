@@ -251,6 +251,7 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
         // State
         voiceMode,
         voiceState,
+        setVoiceState,
         liveTranscript,
         voiceTranscript,
         isListening,

@@ -58,4 +58,35 @@ test.describe('Chat & AI Assistant', () => {
         await selectRestaurant(page);
         await expect(page.locator('.mic-btn')).toBeVisible({ timeout: 5000 });
     });
+
+    test('clear the cart via chat clears cart and shows confirmation', async ({ page }) => {
+        await loginAsCustomer(page);
+        await selectRestaurant(page);
+        await expect(page.locator('.ai-chat-input')).toBeVisible({ timeout: 5000 });
+        // Add an item via chat (type item name; bot may add it if menu has it)
+        await page.locator('.ai-chat-input').fill('biryani');
+        await page.locator('.send-btn').click();
+        await page.waitForTimeout(5000);
+        // Clear the cart via chat
+        await page.locator('.ai-chat-input').fill('clear the cart');
+        await page.locator('.send-btn').click();
+        await page.waitForTimeout(5000);
+        // Bot should reply with "Cart cleared"
+        await expect(page.locator('.ai-bubble').filter({ hasText: /Cart cleared/i })).toBeVisible({ timeout: 8000 });
+    });
+
+    test('change the restaurant via chat gets a reply', async ({ page }) => {
+        await loginAsCustomer(page);
+        await selectRestaurant(page);
+        await expect(page.locator('.ai-chat-input')).toBeVisible({ timeout: 5000 });
+        // Ask to change restaurant (exact phrase we support)
+        await page.locator('.ai-chat-input').fill('change the restaurant to Test');
+        await page.locator('.send-btn').click();
+        await page.waitForTimeout(5000);
+        // Bot should reply (either switched or "couldn't find" / suggestions)
+        const bubbles = page.locator('.ai-bubble');
+        await expect(bubbles.last()).toBeVisible({ timeout: 8000 });
+        const lastText = await bubbles.last().textContent();
+        expect(lastText.length).toBeGreaterThan(0);
+    });
 });

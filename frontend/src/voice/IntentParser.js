@@ -40,7 +40,8 @@ export const INTENTS = {
     GOODBYE: 'GOODBYE',               // "bye"
     MEAL_PLAN: 'MEAL_PLAN',            // "plan meals for the week"
     SHOW_CART: 'SHOW_CART',            // "what's in my cart", "show cart"
-    UNCLEAR: 'UNCLEAR',               // Can't classify
+    CLEAR_CART: 'CLEAR_CART',          // "clear the cart", "order fresh"
+    UNCLEAR: 'UNCLEAR',                // Can't classify
 };
 
 // ─── Intent detection patterns ──────────────────────────────────────
@@ -78,6 +79,20 @@ const CHECKOUT_PATTERNS = [
 
 const SHOW_CART_PATTERNS = [
     /^(?:show|what'?s?\s+(?:in\s+)?(?:my\s+)?cart|view\s+cart|my\s+cart|my\s+order|cart)\s*$/i,
+];
+
+const CLEAR_CART_PATTERNS = [
+    /^(?:clear|empty)\s+(?:the\s+)?(?:my\s+)?cart\s*$/i,
+    /^(?:clear|empty)\s+(?:the\s+)?(?:my\s+)?order\s*$/i,
+    /^order\s+fresh\s*$/i,
+    /^start\s+fresh\s*$/i,
+    /^(?:cancel|clear)\s+(?:my\s+)?order\s*$/i,
+    /^remove\s+all\s*$/i,
+    /^clear\s+all\s*$/i,
+    /^(?:i\s+want\s+to\s+|please\s+)?clear\s+(?:the\s+)?(?:my\s+)?cart/i,
+    // Voice often transcribes "cart" as "court" or "car"
+    /^clear\s+(?:the\s+)?(?:court|car)(?:\s+completely)?\s*$/i,
+    /^clear\s+my\s+(?:court|car)(?:\s+completely)?\s*$/i,
 ];
 
 const GREETING_PATTERNS = [
@@ -158,6 +173,13 @@ export function parseIntent(text, convState = {}, restaurants = []) {
         return result;
     }
 
+    // ─── 3b. Clear cart / order fresh ─────────────────────────────
+    if (CLEAR_CART_PATTERNS.some(p => p.test(t))) {
+        result.intent = INTENTS.CLEAR_CART;
+        result.parseTimeMs = performance.now() - start;
+        return result;
+    }
+
     // ─── 4. Meal plan ────────────────────────────────────────────
     if (MEAL_PLAN_PATTERNS.some(p => p.test(t))) {
         result.intent = INTENTS.MEAL_PLAN;
@@ -194,7 +216,10 @@ export function parseIntent(text, convState = {}, restaurants = []) {
 
     // ─── 6. Change restaurant (to specific name) ───────────────────
     if (restaurants.length > 0) {
-        const switchRegex = /^(?:change|switch|move|go)\s+(?:to|the\s+restaurant\s+to)\s+/i;
+        // "go to the restaurant DC District" → extract "DC District" (voice often says "DC" for "Desi")
+        const goToRestaurantRegex = /^go\s+to\s+the\s+restaurant\s+(?:to\s+)?/i;
+        const switchRegex = /^(?:change|switch|move)\s+(?:to\s+|the\s+restaurant\s+to\s+)/i;
+        const switchRegexGo = /^go\s+to\s+the\s+restaurant\s+to\s+/i;
         const fromRegex = /(?:from|at|in)\s+(.+?)(?:\s+restaurant|\s+menu)?\s*$/i;
         const selectRegex = /^(?:show|open|select|pick|choose|try|use|browse|order\s+from)\s+/i;
         // Handle 'I want to select X restaurant', 'can you select the restaurant X', 'take me to X', 'let's try X'
@@ -202,8 +227,12 @@ export function parseIntent(text, convState = {}, restaurants = []) {
 
         let candidateName = null;
 
-        if (switchRegex.test(t)) {
+        if (goToRestaurantRegex.test(t)) {
+            candidateName = t.replace(goToRestaurantRegex, '').trim();
+        } else if (switchRegex.test(t)) {
             candidateName = t.replace(switchRegex, '').trim();
+        } else if (switchRegexGo.test(t)) {
+            candidateName = t.replace(switchRegexGo, '').trim();
         } else if (wantSelectRegex.test(t)) {
             candidateName = t.match(wantSelectRegex)?.[1]?.trim();
         } else if (fromRegex.test(t)) {
@@ -377,6 +406,31 @@ function extractDish(t) {
     return null;
 }
 
+// ─── Helper: edit distance for voice mishearings (e.g. "DC" vs "Desi") ──
+function editDistance(a, b) {
+    if (a.length === 0) return b.length;
+    if (b.length === 0) return a.length;
+    const matrix = [];
+    for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+    for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+    for (let i = 1; i <= b.length; i++) {
+        for (let j = 1; j <= a.length; j++) {
+            if (b[i - 1] === a[j - 1]) matrix[i][j] = matrix[i - 1][j - 1];
+            else matrix[i][j] = 1 + Math.min(matrix[i - 1][j - 1], matrix[i][j - 1], matrix[i - 1][j]);
+        }
+    }
+    return matrix[b.length][a.length];
+}
+
+function wordSimilarity(iWord, rWord) {
+    if (iWord === rWord) return true;
+    if (rWord.includes(iWord) || iWord.includes(rWord)) return true;
+    const len = Math.max(iWord.length, rWord.length);
+    if (len <= 2) return iWord === rWord;
+    const dist = editDistance(iWord, rWord);
+    return dist <= 2 || dist <= Math.ceil(len * 0.4);
+}
+
 // ─── Helper: fuzzy match restaurant name ─────────────────────────────
 function fuzzyMatchRestaurant(name, restaurants) {
     const lower = name.toLowerCase().replace(/restaurant|menu/gi, '').trim();
@@ -399,7 +453,30 @@ function fuzzyMatchRestaurant(name, restaurants) {
             lower.includes(r.name.toLowerCase()) ||
             (r.slug || '').toLowerCase().includes(lower)
     );
-    return match || null;
+    if (match) return match;
+
+    // Voice mishearings: "DC District" → "Desi District" (word-by-word similarity)
+    const iWords = lower.split(/\s+/).filter(Boolean);
+    if (iWords.length >= 1) {
+        let best = null;
+        let bestScore = 0;
+        for (const r of pool) {
+            const rName = r.name.toLowerCase();
+            const rWords = rName.split(/\s+/).filter(Boolean);
+            if (rWords.length !== iWords.length) continue;
+            let score = 0;
+            for (let i = 0; i < iWords.length; i++) {
+                if (wordSimilarity(iWords[i], rWords[i])) score += 1;
+                else if (editDistance(iWords[i], rWords[i]) <= 3) score += 0.5;
+            }
+            if (score > bestScore && score >= iWords.length * 0.5) {
+                bestScore = score;
+                best = r;
+            }
+        }
+        if (best) return best;
+    }
+    return null;
 }
 
 /**

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, verifyPayment, trackOrder, getRestaurantQueue, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal } from "./api.js";
+import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, submitFeedback, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, verifyPayment, trackOrder, getRestaurantQueue, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal, fetchCategoryItems } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
+import TasteProfile from "./TasteProfile.jsx";
 import { useVoiceController } from "./voice/useVoiceController.js";
 import { trace, traceError } from "./voice/trace.js";
 
@@ -239,13 +240,18 @@ export default function App() {
   // Orders
   const [myOrders, setMyOrders] = useState([]);
   const [ordersTab, setOrdersTab] = useState("current");
+  // Post-order feedback (per order)
+  const [feedbackRating, setFeedbackRating] = useState({});
+  const [feedbackIssues, setFeedbackIssues] = useState({});
+  const [feedbackComment, setFeedbackComment] = useState({});
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(null);
 
   // Voice Conversation Mode — powered by useVoiceController hook (English / Tamil)
   const doSendRef = useRef(null);
   const voiceSpeakRef = useRef(null);
   const [voiceLanguage, setVoiceLanguage] = useState("en");
   const voice = useVoiceController({ apiBase: API, doSendRef, language: voiceLanguage });
-  const { voiceMode, voiceState, liveTranscript, voiceTranscript, isListening, voiceModeRef, voiceStateRef } = voice;
+  const { voiceMode, voiceState, setVoiceState, liveTranscript, voiceTranscript, isListening, voiceModeRef, voiceStateRef } = voice;
   const voiceStartListeningRef = useRef(null);
   const lastVoicePromptRef = useRef(null);
   // Bridge voiceSpeakRef for doSend's fromVoice paths
@@ -849,18 +855,31 @@ export default function App() {
         // ── Client-side category matching (instant, no backend) ──────
         // Skip when input is more specific than a category name (e.g. "iced coffee" → item, not category "Coffee")
         if (activeCategories.length > 0) {
-          const inputLower = (fromVoice ? cleanedText : trimmed).toLowerCase().replace(/\s+/g, '');
-          const inputWords = (fromVoice ? cleanedText : trimmed).trim().split(/\s+/).length;
-          let matchedCat = activeCategories.find(cat => {
-            const catLower = (typeof cat.name === 'string' ? cat.name : cat).toLowerCase().replace(/\s+/g, '');
-            const catWords = (typeof cat.name === 'string' ? cat.name : cat).trim().split(/\s+/).length;
-            // Input more specific than category (e.g. "iced coffee" vs "Coffee") → let backend match item
-            if (inputWords > catWords || inputLower.length > catLower.length + 3) return false;
-            return catLower === inputLower
-              || catLower.startsWith(inputLower)
-              || inputLower.startsWith(catLower)
-              || (catLower.includes(inputLower) && inputLower.length >= catLower.length - 2);
-          });
+          const rawInput = (fromVoice ? cleanedText : trimmed).trim();
+          const inputLower = rawInput.toLowerCase().replace(/\s+/g, '');
+          const inputWords = rawInput.split(/\s+/).length;
+          // Extract possible category phrase: "go to the appetizers" → "appetizers", "show me coffee" → "coffee"
+          const goToPrefixes = /^(?:go\s+to\s+(?:the\s+)?|show\s+me\s+(?:the\s+)?|take\s+me\s+to\s+(?:the\s+)?|switch\s+to\s+(?:the\s+)?|i\s+want\s+(?:the\s+)?|open\s+(?:the\s+)?)\s*/i;
+          const categoryPhrase = rawInput.replace(goToPrefixes, '').trim();
+          const phraseLower = categoryPhrase.toLowerCase().replace(/\s+/g, '');
+          const phraseWords = categoryPhrase.split(/\s+/).length;
+          const candidates = [
+            { lower: inputLower, words: inputWords },
+            ...(phraseLower && phraseLower !== inputLower ? [{ lower: phraseLower, words: phraseWords }] : []),
+          ];
+          let matchedCat = null;
+          for (const { lower: tryLower, words: tryWords } of candidates) {
+            matchedCat = activeCategories.find(cat => {
+              const catLower = (typeof cat.name === 'string' ? cat.name : cat).toLowerCase().replace(/\s+/g, '');
+              const catWords = (typeof cat.name === 'string' ? cat.name : cat).trim().split(/\s+/).length;
+              if (tryWords > catWords || tryLower.length > catLower.length + 3) return false;
+              return catLower === tryLower
+                || catLower.startsWith(tryLower)
+                || tryLower.startsWith(catLower)
+                || (catLower.includes(tryLower) && tryLower.length >= catLower.length - 2);
+            });
+            if (matchedCat) break;
+          }
           if (matchedCat) {
             console.log(`%c[CategoryMatch] ✅ "${fromVoice ? cleanedText : trimmed}" → category "${matchedCat.name}" (id: ${matchedCat.id})`, 'color: #00ff88; font-weight: bold');
             setActiveCategoryName(matchedCat.name);
@@ -994,6 +1013,9 @@ export default function App() {
         } else {
           setActiveCategoryName(text.trim());
         }
+      } else if (textToSend.startsWith('category:') && res.category_id) {
+        // Chat returned category but no items (e.g. session/restaurant mismatch) — load items via REST
+        fetchCategoryItems(res.category_id).then((items) => setCurrentItems(Array.isArray(items) ? items : [])).catch(() => {});
       }
       if (res.cart_summary) setCartData(res.cart_summary);
       if (text.trim().startsWith("add:")) {
@@ -1045,7 +1067,31 @@ export default function App() {
   doSendRef.current = doSend;
 
   const handleSend = (e) => { e.preventDefault(); doSend(messageText); };
-  const handleCategoryClick = (cat) => { setActiveCategoryName(cat.name); doSend(`category:${cat.id}`); };
+  const handleCategoryClick = async (cat) => {
+    setActiveCategoryName(cat.name);
+    setStatus("Loading...");
+    // Always load menu items via REST so the list shows regardless of chat session state
+    try {
+      const items = await fetchCategoryItems(cat.id);
+      const list = Array.isArray(items) ? items : [];
+      setCurrentItems(list);
+      if (token) {
+        // Logged in: also notify chat for cart/session; reply will append in doSend
+        doSend(`category:${cat.id}`);
+      } else {
+        setMessages((p) => [...p, {
+          role: "bot",
+          content: `${cat.name} — ${list.length} items. Sign in to add to cart, or browse below.`,
+          items: list.length ? list : null,
+        }]);
+      }
+    } catch (err) {
+      setCurrentItems([]);
+      setMessages((p) => [...p, { role: "bot", content: "Couldn't load this category. Try again or sign in." }]);
+      if (token) doSend(`category:${cat.id}`);
+    }
+    setStatus("Ready.");
+  };
   const handleAddItem = (item) => {
     setAddedItemId(item.id);
     setTimeout(() => setAddedItemId(null), 500);
@@ -1785,6 +1831,13 @@ export default function App() {
         )}
 
         {/* ====== ORDERS TAB ====== */}
+        {/* ====== TASTE PROFILE TAB (AI Flavor / Recommendations) ====== */}
+        {tab === "taste" && (
+          <motion.div className="taste-tab-wrap" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+            <TasteProfile token={token} />
+          </motion.div>
+        )}
+
         {tab === "orders" && (
           <motion.div className="orders-page" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
             <div className="orders-title">Your Orders</div>
@@ -1870,14 +1923,101 @@ export default function App() {
                       </div>
                     ) : (
                       completedOrders.map((order) => (
-                        <div key={order.id} className="recent-order">
-                          <div className="recent-order-info">
-                            <div className="recent-order-name">🍽️ {order.restaurant_name}</div>
-                            <div className="recent-order-detail">
-                              {order.items.map((it) => `${it.quantity}x ${it.name}`).join(', ')} · ${(order.total_cents / 100).toFixed(2)}
+                        <div key={order.id} className="recent-order-wrap">
+                          <div className="recent-order">
+                            <div className="recent-order-info">
+                              <div className="recent-order-name">🍽️ {order.restaurant_name}</div>
+                              <div className="recent-order-detail">
+                                {order.items.map((it) => `${it.quantity}x ${it.name}`).join(', ')} · ${(order.total_cents / 100).toFixed(2)}
+                              </div>
                             </div>
+                            {order.feedback ? (
+                              <span className="feedback-done-badge">✓ Rated {order.feedback.rating}★</span>
+                            ) : (
+                              <span className="delivered-badge">Delivered</span>
+                            )}
                           </div>
-                          <span className="delivered-badge">Delivered</span>
+                          {order.feedback_eligible && !order.feedback && (
+                            <div className="feedback-card">
+                              <div className="feedback-card-title">How was your order from {order.restaurant_name}?</div>
+                              <div className="feedback-stars">
+                                {[1, 2, 3, 4, 5].map((star) => (
+                                  <button
+                                    key={star}
+                                    type="button"
+                                    className={`feedback-star ${(feedbackRating[order.id] || 0) >= star ? 'on' : ''}`}
+                                    onClick={() => setFeedbackRating((p) => ({ ...p, [order.id]: star }))}
+                                    aria-label={`${star} star`}
+                                  >
+                                    ★
+                                  </button>
+                                ))}
+                              </div>
+                              <div className="feedback-star-labels">
+                                {(feedbackRating[order.id] || 0) <= 3 && feedbackRating[order.id] != null && (
+                                  <div className="feedback-issues-section">
+                                    <div className="feedback-issues-title">What went wrong?</div>
+                                    {[
+                                      { id: 'cold_food', label: 'Food was cold' },
+                                      { id: 'taste_bad', label: 'Taste was bad' },
+                                      { id: 'missing_items', label: 'Missing items' },
+                                      { id: 'late_delivery', label: 'Late delivery' },
+                                      { id: 'wrong_order', label: 'Wrong order' },
+                                      { id: 'packaging_issue', label: 'Packaging issue' },
+                                      { id: 'other', label: 'Other' },
+                                    ].map(({ id, label }) => (
+                                      <label key={id} className="feedback-issue-chip">
+                                        <input
+                                          type="checkbox"
+                                          checked={((feedbackIssues[order.id] || [])).includes(id)}
+                                          onChange={(e) => {
+                                            const next = (feedbackIssues[order.id] || []).filter((x) => x !== id);
+                                            if (e.target.checked) next.push(id);
+                                            setFeedbackIssues((p) => ({ ...p, [order.id]: next }));
+                                          }}
+                                        />
+                                        <span>{label}</span>
+                                      </label>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                              <textarea
+                                className="feedback-comment"
+                                placeholder="Tell us more (optional)"
+                                value={feedbackComment[order.id] || ''}
+                                onChange={(e) => setFeedbackComment((p) => ({ ...p, [order.id]: e.target.value }))}
+                                rows={2}
+                              />
+                              <button
+                                type="button"
+                                className="feedback-submit-btn"
+                                disabled={!feedbackRating[order.id] || feedbackSubmitting === order.id}
+                                onClick={async () => {
+                                  if (!token || !feedbackRating[order.id]) return;
+                                  setFeedbackSubmitting(order.id);
+                                  try {
+                                    await submitFeedback(token, {
+                                      order_id: order.id,
+                                      rating: feedbackRating[order.id],
+                                      issues: (feedbackRating[order.id] || 0) <= 3 ? (feedbackIssues[order.id] || []) : undefined,
+                                      comment: (feedbackComment[order.id] || '').trim() || undefined,
+                                    });
+                                    setFeedbackRating((p) => { const n = { ...p }; delete n[order.id]; return n; });
+                                    setFeedbackIssues((p) => { const n = { ...p }; delete n[order.id]; return n; });
+                                    setFeedbackComment((p) => { const n = { ...p }; delete n[order.id]; return n; });
+                                    fetchMyOrders(token).then(setMyOrders).catch(() => {});
+                                  } catch (err) {
+                                    console.error(err);
+                                  } finally {
+                                    setFeedbackSubmitting(null);
+                                  }
+                                }}
+                              >
+                                {feedbackSubmitting === order.id ? 'Submitting…' : 'Submit Feedback'}
+                              </button>
+                            </div>
+                          )}
                         </div>
                       ))
                     )}
@@ -2151,6 +2291,10 @@ export default function App() {
           <span className="nav-icon">📦</span>
           <span>Orders</span>
           {activeOrders.length > 0 && <span className="nav-badge">{activeOrders.length}</span>}
+        </button>
+        <button className={`nav-item ${tab === "taste" ? "active" : ""}`} onClick={() => setTab("taste")}>
+          <span className="nav-icon">🧠</span>
+          <span>Taste</span>
         </button>
         <button className={`nav-item ${tab === "profile" ? "active" : ""}`} onClick={() => setTab("profile")}>
           <span className="nav-icon">👤</span>

@@ -425,9 +425,10 @@ class TestMyOrders:
         assert orders[0]["status"] == "confirmed"
 
     def test_my_orders_no_auth(self, client):
-        """Accessing /my-orders without auth should return 401/403."""
+        """Accessing /my-orders without auth returns 200 with empty list (optional auth)."""
         resp = client.get("/my-orders")
-        assert resp.status_code in (401, 403)
+        assert resp.status_code == 200
+        assert resp.json() == []
 
 
 # ============================================================

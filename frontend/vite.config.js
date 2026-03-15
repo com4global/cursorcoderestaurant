@@ -17,6 +17,12 @@ export default defineConfig({
       "/health": "http://127.0.0.1:8000",
       "/categories": "http://127.0.0.1:8000",
       "/nearby": "http://127.0.0.1:8000",
+      "/taste": "http://127.0.0.1:8000",
+      "/feedback": "http://127.0.0.1:8000",
+      "/orders": "http://127.0.0.1:8000",
+      "/cart": "http://127.0.0.1:8000",
+      "/checkout": "http://127.0.0.1:8000",
+      "/ai": "http://127.0.0.1:8000",
     },
   },
 });

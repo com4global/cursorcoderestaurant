@@ -55,6 +55,11 @@ export async function searchMenuItems(query) {
   return request(`/search/menu-items?q=${encodeURIComponent(query)}`);
 }
 
+/** Fetch menu items for a category (no auth required). Used when guest clicks a category. */
+export async function fetchCategoryItems(categoryId) {
+  return request(`/categories/${categoryId}/items`);
+}
+
 export async function fetchPopularItems() {
   return request(`/search/popular`);
 }
@@ -234,6 +239,12 @@ export async function updateOrderStatus(token, orderId, status) {
   });
 }
 
+export async function fetchComplaints(token, restaurantId) {
+  return request(`/owner/restaurants/${restaurantId}/complaints`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 export async function checkout(token) {
   return request("/checkout", {
     method: "POST",
@@ -253,6 +264,39 @@ export async function fetchMyOrders(token) {
   return request("/my-orders", {
     headers: { Authorization: `Bearer ${token}` },
   });
+}
+
+// --- Post-Order Feedback ---
+export async function submitFeedback(token, payload) {
+  return request("/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+// --- Taste Profile (AI Flavor / Recommendations) ---
+
+export async function getTasteProfile(token) {
+  return request("/taste/profile", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function updateTasteProfile(token, payload) {
+  return request("/taste/profile", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getTasteHistorySummary(token) {
+  return request("/taste/history-summary", { headers: { Authorization: `Bearer ${token}` } });
+}
+
+export async function getTasteRecommendations(token, limit = 10) {
+  return request(`/taste/recommendations?limit=${limit}`, { headers: { Authorization: `Bearer ${token}` } });
 }
 
 // --- Sarvam AI Voice APIs ---

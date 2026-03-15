@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:e2e": "PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-$PWD/.playwright-browsers} npx playwright test",
+    "test:e2e:install": "PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-$PWD/.playwright-browsers} npx playwright install chromium"
   },
   "dependencies": {
     "framer-motion": "^12.35.0",

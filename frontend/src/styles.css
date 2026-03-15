@@ -1842,6 +1842,358 @@ img {
   background: var(--accent-hover);
 }
 
+/* ===== Post-Order Feedback Card ===== */
+.recent-order-wrap {
+  margin-bottom: 12px;
+}
+
+.feedback-done-badge {
+  display: inline-block;
+  background: rgba(99, 102, 241, 0.15);
+  color: var(--accent);
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  font-size: 0.65rem;
+  font-weight: 600;
+}
+
+.feedback-card {
+  margin-top: 10px;
+  padding: 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.feedback-card-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.feedback-stars {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.feedback-star {
+  background: none;
+  border: none;
+  font-size: 1.6rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0 2px;
+  transition: transform 0.15s;
+}
+
+.feedback-star:hover {
+  transform: scale(1.15);
+}
+
+.feedback-star.on {
+  color: #fbbf24;
+}
+
+.feedback-issues-section {
+  margin-top: 10px;
+  margin-bottom: 10px;
+}
+
+.feedback-issues-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.feedback-issue-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 10px;
+  margin-bottom: 6px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.feedback-issue-chip input {
+  width: 14px;
+  height: 14px;
+}
+
+.feedback-comment {
+  width: 100%;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  resize: vertical;
+}
+
+.feedback-submit-btn {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.feedback-submit-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.feedback-submit-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ===== TASTE PROFILE TAB (AI Flavor / Recommendations) ===== */
+.taste-tab-wrap {
+  padding-bottom: 24px;
+}
+
+.taste-page {
+  padding: 16px;
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+.taste-header {
+  text-align: center;
+  margin-bottom: 24px;
+}
+
+.taste-header-emoji {
+  font-size: 2.5rem;
+  display: block;
+  margin-bottom: 8px;
+}
+
+.taste-title {
+  font-size: 1.35rem;
+  font-weight: 800;
+  margin: 0 0 4px;
+}
+
+.taste-subtitle {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.taste-loading,
+.taste-error {
+  text-align: center;
+  padding: 20px;
+  color: var(--text-secondary);
+}
+
+.taste-error {
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: var(--radius-md);
+  margin-bottom: 16px;
+}
+
+.taste-empty {
+  text-align: center;
+  padding: 40px 20px;
+}
+
+.taste-empty-emoji {
+  font-size: 3rem;
+  margin-bottom: 12px;
+  display: block;
+}
+
+.taste-empty-text {
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+.taste-empty-hint {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.taste-section {
+  margin-bottom: 24px;
+}
+
+.taste-section-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin: 0 0 8px;
+}
+
+.taste-section-hint {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin: 0 0 10px;
+}
+
+.taste-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.taste-option-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  transition: var(--transition);
+}
+
+.taste-option-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.taste-option-btn.active {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.taste-option-emoji {
+  font-size: 1.1rem;
+}
+
+.taste-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.taste-chip {
+  padding: 6px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  transition: var(--transition);
+}
+
+.taste-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.taste-chip.active {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.taste-input {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.taste-input::placeholder {
+  color: var(--text-dim);
+}
+
+.taste-actions {
+  margin-top: 24px;
+  margin-bottom: 16px;
+}
+
+.taste-save-btn {
+  width: 100%;
+  padding: 12px 16px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 0.95rem;
+  font-weight: 600;
+  transition: var(--transition);
+}
+
+.taste-save-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.taste-save-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.taste-updated {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin: 0 0 24px;
+}
+
+.taste-recommendations-section {
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.taste-recommendations-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.taste-rec-item {
+  padding: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  margin-bottom: 8px;
+}
+
+.taste-rec-name {
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.taste-rec-meta {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.taste-rec-reason {
+  font-size: 0.8rem;
+  color: var(--accent);
+  margin-top: 4px;
+}
+
+.taste-placeholder-text {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
 /* ===== CART PANEL ===== */
 .cart-panel {
   position: absolute;
@@ -2485,6 +2837,47 @@ img {
 /* --- Orders Panel --- */
 .owner-orders-panel {
   padding: 12px 16px;
+}
+
+.owner-complaints-box {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.owner-complaints-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--danger);
+  margin-bottom: 8px;
+}
+
+.owner-complaint-item {
+  font-size: 0.8rem;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(239, 68, 68, 0.15);
+}
+
+.owner-complaint-item:last-child {
+  border-bottom: none;
+}
+
+.owner-complaint-meta {
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+}
+
+.owner-complaint-issues {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.owner-complaint-comment {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-style: italic;
 }
 
 /* Search & Date Filters */

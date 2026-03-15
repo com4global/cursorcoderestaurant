@@ -32,6 +32,7 @@ const COMMAND_KEYWORDS = [
     'select', 'open', 'go', 'menu', 'cart', 'checkout', 'place',
     'plan', 'meal', 'help', 'hello', 'hi', 'hey', 'bye', 'thanks',
     'categories', 'filter', 'sort', 'under', 'below', 'want', 'need',
+    'clear', 'empty', 'cancel', 'fresh',
     'get', 'give', 'browse', 'try', 'visit', 'pick', 'choose',
 ];
 

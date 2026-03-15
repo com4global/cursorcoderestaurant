@@ -98,6 +98,14 @@ htmlcov/
 .tox/
 
 # ============================
+# Playwright / E2E
+# ============================
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+frontend/.playwright-browsers/
+
+# ============================
 # Cursor / Local
 # ============================
 .cursor/

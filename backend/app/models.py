@@ -18,6 +18,7 @@ class User(Base):
     sessions = relationship("ChatSession", back_populates="user")
     orders = relationship("Order", back_populates="user")
     restaurants = relationship("Restaurant", back_populates="owner")
+    taste_profile = relationship("TasteProfile", back_populates="user", uselist=False)
 
 
 class Restaurant(Base):
@@ -70,6 +71,7 @@ class MenuItem(Base):
     portion_people = Column(Integer, nullable=True)       # how many people this feeds
     cuisine = Column(String(60), nullable=True)            # e.g. "Indian", "Italian"
     protein_type = Column(String(40), nullable=True)       # e.g. "chicken", "veg", "paneer"
+    tags = Column(Text, nullable=True)                     # JSON array: ["spicy", "vegetarian", "biryani"]
     calories = Column(Integer, nullable=True)
     prep_time_mins = Column(Integer, nullable=True)
 
@@ -105,6 +107,23 @@ class OrderItem(Base):
     order = relationship("Order", back_populates="items")
 
 
+class OrderFeedback(Base):
+    """Post-order feedback: rating, issues, comment, photo. Rating <= 2 escalates to restaurant."""
+    __tablename__ = "order_feedbacks"
+
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, unique=True)  # one feedback per order
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    rating = Column(Integer, nullable=False)  # 1-5
+    issues = Column(Text, nullable=True)  # JSON array: ["cold_food", "taste_bad", ...]
+    comment = Column(Text, nullable=True)
+    photo_url = Column(String(500), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    order = relationship("Order", backref="feedback")
+    user = relationship("User", backref="order_feedbacks")
+
+
 class ChatSession(Base):
     __tablename__ = "chat_sessions"
 
@@ -131,6 +150,22 @@ class ChatMessage(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     session = relationship("ChatSession", back_populates="messages")
+
+
+class TasteProfile(Base):
+    """User taste preferences for AI flavor profile and personalized recommendations."""
+    __tablename__ = "taste_profiles"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
+    spice_level = Column(String(20), default="medium", nullable=False)  # mild, medium, spicy
+    diet = Column(String(40), nullable=True)  # any, vegetarian, vegan, halal
+    liked_cuisines = Column(Text, nullable=True)  # JSON array of strings
+    disliked_tags = Column(Text, nullable=True)  # free text e.g. "nuts, dairy"
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    user = relationship("User", back_populates="taste_profile")
 
 
 class Subscription(Base):

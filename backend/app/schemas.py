@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, model_validator
 
 
 class Token(BaseModel):
@@ -94,6 +95,7 @@ class ItemCreate(BaseModel):
     portion_people: int | None = None
     cuisine: str | None = None
     protein_type: str | None = None
+    tags: list[str] | None = None
     calories: int | None = None
     prep_time_mins: int | None = None
 
@@ -106,6 +108,7 @@ class ItemUpdate(BaseModel):
     portion_people: int | None = None
     cuisine: str | None = None
     protein_type: str | None = None
+    tags: list[str] | None = None
     calories: int | None = None
     prep_time_mins: int | None = None
 
@@ -127,10 +130,44 @@ class MenuItemOut(BaseModel):
     portion_people: int | None = None
     cuisine: str | None = None
     protein_type: str | None = None
+    tags: list[str] = []
     calories: int | None = None
     prep_time_mins: int | None = None
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_tags_or_derive(cls, data):
+        from app.taste_tags import derive_item_tags
+        if hasattr(data, "name"):
+            raw = getattr(data, "tags", None)
+            name = getattr(data, "name", None)
+            cuisine = getattr(data, "cuisine", None)
+            protein_type = getattr(data, "protein_type", None)
+            if raw is None or raw == "":
+                tags = derive_item_tags(name, cuisine, protein_type)
+            elif isinstance(raw, str):
+                try:
+                    tags = json.loads(raw) if raw.strip() else []
+                except (json.JSONDecodeError, TypeError):
+                    tags = []
+            else:
+                tags = list(raw) if raw else []
+            if not isinstance(data, dict):
+                data = {f: getattr(data, f, None) for f in ("id", "name", "description", "price_cents", "is_available", "portion_people", "cuisine", "protein_type", "calories", "prep_time_mins")}
+            data["tags"] = tags
+            return data
+        if isinstance(data, dict):
+            raw = data.get("tags")
+            if raw is None or raw == "":
+                data["tags"] = derive_item_tags(data.get("name"), data.get("cuisine"), data.get("protein_type"))
+            elif isinstance(raw, str):
+                try:
+                    data["tags"] = json.loads(raw) if raw.strip() else []
+                except (json.JSONDecodeError, TypeError):
+                    data["tags"] = []
+        return data
 
 
 class ChatSessionOut(BaseModel):
@@ -284,3 +321,86 @@ class MealPlanResponse(BaseModel):
     savings_cents: int
     people_count: int = 1
     ai_summary: str | None = None
+
+
+# --- Taste Profile (AI Flavor / Recommendations) ---
+
+class TasteProfileUpdate(BaseModel):
+    spice_level: str | None = None
+    diet: str | None = None
+    liked_cuisines: list[str] | None = None
+    disliked_tags: str | None = None
+
+
+class TasteProfileOut(BaseModel):
+    id: int
+    user_id: int
+    spice_level: str
+    diet: str | None
+    liked_cuisines: list[str]
+    disliked_tags: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TasteHistorySummaryOut(BaseModel):
+    ordered_item_ids: list[int]
+    cuisine_counts: dict[str, int]
+    protein_counts: dict[str, int]
+    item_names: list[str]
+    total_orders: int
+
+
+class TasteRecommendationOut(BaseModel):
+    menu_item_id: int
+    name: str
+    restaurant_id: int
+    restaurant_name: str
+    price_cents: int
+    reason: str
+
+
+# --- Post-Order Feedback ---
+
+FEEDBACK_ISSUES = [
+    "cold_food", "taste_bad", "missing_items", "late_delivery",
+    "wrong_order", "packaging_issue", "other",
+]
+
+
+class FeedbackCreate(BaseModel):
+    order_id: int
+    rating: int = Field(ge=1, le=5)
+    issues: list[str] | None = None  # from FEEDBACK_ISSUES when rating <= 3
+    comment: str | None = None
+    # photo: optional file upload handled separately
+
+
+class FeedbackOut(BaseModel):
+    id: int
+    order_id: int
+    rating: int
+    issues: list[str]
+    comment: str | None
+    photo_url: str | None
+    created_at: datetime
+    escalated: bool  # True when rating <= 2
+
+    model_config = {"from_attributes": True}
+
+
+class ComplaintOut(BaseModel):
+    """For restaurant dashboard: feedback that was escalated (rating <= 2)."""
+    id: int
+    order_id: int
+    user_id: int
+    rating: int
+    issues: list[str]
+    comment: str | None
+    photo_url: str | None
+    created_at: datetime
+    restaurant_id: int
+    restaurant_name: str
+    order_items_summary: str

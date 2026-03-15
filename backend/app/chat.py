@@ -72,8 +72,25 @@ def _build_cart_summary_chat(db: Session, user_id: int) -> dict:
 def _set_session_state(db: Session, session: ChatSession, **updates) -> None:
     for key, value in updates.items():
         setattr(session, key, value)
-    session.updated_at = datetime.utcnow()
-    db.commit()
+    try:
+        session.updated_at = datetime.utcnow()
+        db.commit()
+    except Exception:
+        db.rollback()
+        # Commit may fail if table lacks status/updated_at: update only core columns via raw SQL
+        from sqlalchemy import text
+        allowed = {"restaurant_id", "category_id", "order_id"}
+        set_parts = []
+        params = {"sid": session.id}
+        for k, v in updates.items():
+            if k in allowed:
+                set_parts.append(f"{k} = :{k}")
+                params[k] = v
+        if set_parts:
+            db.execute(text(f"UPDATE chat_sessions SET {', '.join(set_parts)} WHERE id = :sid"), params)
+            db.commit()
+        else:
+            raise
 
 
 def _categories_data(db, restaurant_id):
@@ -532,8 +549,9 @@ def _parse_order_items(text: str, all_items: list[MenuItem]) -> list[tuple[MenuI
     }
 
     cleaned = text.lower().strip()
-    for filler in ["i want", "i'd like", "i would like", "give me", "get me",
-                   "can i have", "can i get", "please", "order", "add"]:
+    for filler in ["i would like to order", "i want to order", "i'd like to order",
+                   "i want", "i'd like", "i would like", "give me", "get me",
+                   "can i have", "can i get", "please", "order", "add", "to order"]:
         cleaned = cleaned.replace(filler, "")
     cleaned = cleaned.strip().strip(",").strip()
 
@@ -587,12 +605,42 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
     cleaned = text.strip()
     lower = cleaned.lower()
 
-    # --- Reset / Exit ---
+    # --- Reset / Exit (also clear cart so user truly starts fresh) ---
     if lower in ("#reset", "#exit", "reset", "exit", "start over"):
+        crud.clear_user_pending_orders(db, session.user_id)
         _set_session_state(db, session, restaurant_id=None, category_id=None, order_id=None)
         return _result(
             "Session reset. Type # to pick a restaurant!",
             voice_prompt="Which restaurant would you like to order from?",
+        )
+
+    # --- Clear cart / order fresh (keep restaurant; clear all items) ---
+    _clear_cart_phrases = (
+        "clear cart", "clear the cart", "clear my cart", "empty cart", "empty the cart",
+        "order fresh", "start fresh", "clear my order", "cancel my order", "remove all",
+        "clear order", "cancel order", "clear all", "remove everything", "empty my order",
+        "i want to clear the cart", "clear the order", "start a new order", "new order",
+    )
+    _clear_stripped = re.sub(r"^(?:i\s+want\s+to\s+|i'?d\s+like\s+to\s+|please\s+)\s*", "", lower).strip()
+    # Voice often transcribes "cart" as "court" or "car"; allow "clear the court/car (completely)"
+    _clear_cart_voice = (
+        (lower.startswith("clear the ") or lower.startswith("clear my ") or lower.startswith("clear "))
+        and any(w in lower for w in ("cart", "court", "car", "order", "all"))
+    )
+    if (lower.strip() in _clear_cart_phrases or _clear_stripped in _clear_cart_phrases
+            or any(lower.startswith(p) for p in _clear_cart_phrases)
+            or _clear_cart_voice):
+        crud.clear_user_pending_orders(db, session.user_id)
+        _set_session_state(db, session, order_id=None)
+        cart = _build_cart_summary_chat(db, session.user_id)
+        cats = _categories_data(db, session.restaurant_id) if session.restaurant_id else []
+        return _result(
+            "Cart cleared. What would you like to order?",
+            restaurant_id=session.restaurant_id,
+            category_id=session.category_id,
+            categories=cats,
+            cart_summary=cart,
+            voice_prompt="Cart cleared. What would you like to order?",
         )
 
     # --- AI Budget Optimizer intent ---
@@ -849,6 +897,14 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                 items=items,
                 voice_prompt=f"{match.name}, {len(items)} items. Which one?",
             )
+        # No match: avoid falling through into code that assumes session.restaurant_id
+        return _result(
+            "That category isn't available. Pick a category above or say a dish name.",
+            restaurant_id=session.restaurant_id,
+            category_id=session.category_id,
+            order_id=session.order_id,
+            voice_prompt="Pick another category or tell me what you'd like.",
+        )
 
     # --- Quick add by item ID (from tapping + button) ---
     quick_add = re.match(r'^add:(\d+)(?::(\d+))?$', lower)
@@ -1195,6 +1251,21 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             parsed = [(single_match, 1)]
 
     if not parsed:
+        # Don't treat clarification words as item search ("what", "huh" → helpful prompt)
+        _clarification_words = (
+            "what", "huh", "sorry", "pardon", "eh", "repeat", "again",
+            "hello", "hey", "wait", "um", "ok", "yeah",
+        )
+        if cleaned.lower().strip() in _clarification_words:
+            cats = _categories_data(db, session.restaurant_id)
+            return _result(
+                "You can say a category name, an item to add, or **done** to finish.",
+                restaurant_id=session.restaurant_id,
+                order_id=session.order_id,
+                categories=cats,
+                voice_prompt="Say a category or item name, or say done to finish.",
+            )
+
         # Try search and show matching items for disambiguation
         matches = _find_matching_items(cleaned, all_items)
         if matches:

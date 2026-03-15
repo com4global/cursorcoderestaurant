@@ -9,6 +9,7 @@ import {
     saveImportedMenu,
     fetchOrders,
     fetchArchivedOrders,
+    fetchComplaints,
     updateOrderStatus,
     updateNotifications,
     startOwnerTrial,
@@ -64,6 +65,8 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
     const [ordersView, setOrdersView] = useState({}); // { restaurantId: "active" | "archived" }
     const [archivedOrders, setArchivedOrders] = useState({}); // { restaurantId: { orders, total, page, total_pages } }
     const [archivedLoading, setArchivedLoading] = useState({});
+    // Customer complaints (escalated feedback)
+    const [complaints, setComplaints] = useState({}); // { restaurantId: [...] }
 
     // Search & date filters
     const [orderSearch, setOrderSearch] = useState({}); // { restaurantId: "search text" }
@@ -552,7 +555,10 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
     function getTab(rId) { return activeTab[rId] || "menu"; }
     function setTab(rId, tab) {
         setActiveTab((p) => ({ ...p, [rId]: tab }));
-        if (tab === "orders" && !orders[rId]) loadOrders(rId, {});
+        if (tab === "orders") {
+            if (!orders[rId]) loadOrders(rId, {});
+            fetchComplaints(token, rId).then((list) => setComplaints((p) => ({ ...p, [rId]: list || [] }))).catch(() => {});
+        }
     }
 
     if (loading) {
@@ -809,6 +815,19 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                 {/* ORDERS TAB */}
                                 {tab === "orders" && (
                                     <div className="owner-orders-panel">
+                                        {/* Customer complaints (escalated feedback) */}
+                                        {(complaints[r.id] || []).length > 0 && (
+                                            <div className="owner-complaints-box">
+                                                <div className="owner-complaints-title">⚠️ Customer complaints (need attention)</div>
+                                                {(complaints[r.id] || []).slice(0, 10).map((c) => (
+                                                    <div key={c.id} className="owner-complaint-item">
+                                                        <div className="owner-complaint-meta">Order #{c.order_id} · {c.rating}★</div>
+                                                        <div className="owner-complaint-issues">{Array.isArray(c.issues) ? c.issues.join(", ") : ""}</div>
+                                                        {c.comment && <div className="owner-complaint-comment">{c.comment}</div>}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
                                         {/* Active / Archived toggle */}
                                         <div className="owner-orders-toggle">
                                             <button

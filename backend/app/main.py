@@ -22,6 +22,103 @@ from .ai_dashboard import router as ai_dashboard_router
 
 models.Base.metadata.create_all(bind=engine)
 
+
+def _ensure_chat_sessions_columns():
+    """Add missing columns to chat_sessions if the table was created before they existed (e.g. status, updated_at)."""
+    from sqlalchemy import text
+    is_sqlite = "sqlite" in settings.database_url
+    if is_sqlite:
+        statements = [
+            "ALTER TABLE chat_sessions ADD COLUMN status TEXT DEFAULT 'active'",
+            "ALTER TABLE chat_sessions ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP",
+        ]
+    else:
+        statements = [
+            "ALTER TABLE chat_sessions ADD COLUMN status VARCHAR(40) DEFAULT 'active' NOT NULL",
+            "ALTER TABLE chat_sessions ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL",
+        ]
+    with engine.connect() as conn:
+        for sql in statements:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+            except Exception as e:
+                msg = str(e).lower()
+                if "already exists" in msg or "duplicate column" in msg or "duplicate_column_name" in msg:
+                    conn.rollback()
+                    continue
+                conn.rollback()
+                raise
+
+
+def _ensure_menu_items_columns():
+    """Add missing columns to menu_items (e.g. is_available, cuisine, tags) so list_items and recommendations work."""
+    from sqlalchemy import text
+    is_sqlite = "sqlite" in settings.database_url
+    if is_sqlite:
+        statements = [
+            "ALTER TABLE menu_items ADD COLUMN is_available INTEGER DEFAULT 1",
+            "ALTER TABLE menu_items ADD COLUMN portion_people INTEGER",
+            "ALTER TABLE menu_items ADD COLUMN cuisine TEXT",
+            "ALTER TABLE menu_items ADD COLUMN protein_type TEXT",
+            "ALTER TABLE menu_items ADD COLUMN tags TEXT",
+            "ALTER TABLE menu_items ADD COLUMN calories INTEGER",
+            "ALTER TABLE menu_items ADD COLUMN prep_time_mins INTEGER",
+        ]
+    else:
+        statements = [
+            "ALTER TABLE menu_items ADD COLUMN is_available BOOLEAN DEFAULT TRUE NOT NULL",
+            "ALTER TABLE menu_items ADD COLUMN portion_people INTEGER",
+            "ALTER TABLE menu_items ADD COLUMN cuisine VARCHAR(60)",
+            "ALTER TABLE menu_items ADD COLUMN protein_type VARCHAR(40)",
+            "ALTER TABLE menu_items ADD COLUMN tags TEXT",
+            "ALTER TABLE menu_items ADD COLUMN calories INTEGER",
+            "ALTER TABLE menu_items ADD COLUMN prep_time_mins INTEGER",
+        ]
+    with engine.connect() as conn:
+        for sql in statements:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+            except Exception as e:
+                msg = str(e).lower()
+                if "already exists" in msg or "duplicate column" in msg or "duplicate_column_name" in msg:
+                    conn.rollback()
+                    continue
+                conn.rollback()
+                raise
+
+
+def _ensure_taste_profiles_columns():
+    """Add updated_at to taste_profiles if missing."""
+    from sqlalchemy import text
+    is_sqlite = "sqlite" in settings.database_url
+    sql = "ALTER TABLE taste_profiles ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP" if is_sqlite else "ALTER TABLE taste_profiles ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL"
+    with engine.connect() as conn:
+        try:
+            conn.execute(text(sql))
+            conn.commit()
+        except Exception as e:
+            if "already exists" in str(e).lower() or "duplicate column" in str(e).lower():
+                conn.rollback()
+                return
+            conn.rollback()
+            raise
+
+
+try:
+    _ensure_chat_sessions_columns()
+except Exception as e:
+    print(f"[startup] chat_sessions columns check skipped: {e}")
+try:
+    _ensure_menu_items_columns()
+except Exception as e:
+    print(f"[startup] menu_items columns check skipped: {e}")
+try:
+    _ensure_taste_profiles_columns()
+except Exception as e:
+    print(f"[startup] taste_profiles columns check skipped: {e}")
+
 app = FastAPI(title="RestarentAI")
 app.include_router(voice_router)
 app.include_router(ai_dashboard_router)
@@ -88,31 +185,42 @@ def meal_optimizer(
 # --- Multi-restaurant cart helper ---
 def _build_cart_summary(db: Session, user_id: int) -> dict:
     """Build grouped cart data across all pending orders for a user."""
-    pending_orders = crud.get_user_pending_orders(db, user_id)
+    try:
+        pending_orders = crud.get_user_pending_orders(db, user_id)
+    except Exception:
+        return {"restaurants": [], "grand_total_cents": 0}
     groups = []
     grand_total = 0
     for order in pending_orders:
-        restaurant = db.query(models.Restaurant).filter(models.Restaurant.id == order.restaurant_id).first()
-        items = []
-        for oi in order.items:
-            mi = db.query(models.MenuItem).filter(models.MenuItem.id == oi.menu_item_id).first()
-            line_total = oi.price_cents * oi.quantity
-            items.append({
-                "order_item_id": oi.id,
-                "name": mi.name if mi else f"Item #{oi.menu_item_id}",
-                "quantity": oi.quantity,
-                "price_cents": oi.price_cents,
-                "line_total_cents": line_total,
-            })
-        if items:
-            groups.append({
-                "restaurant_id": order.restaurant_id,
-                "restaurant_name": restaurant.name if restaurant else "Unknown",
-                "order_id": order.id,
-                "items": items,
-                "subtotal_cents": order.total_cents,
-            })
-            grand_total += order.total_cents
+        try:
+            restaurant = db.query(models.Restaurant).filter(models.Restaurant.id == order.restaurant_id).first()
+            items = []
+            for oi in order.items:
+                mi = db.query(models.MenuItem).filter(models.MenuItem.id == oi.menu_item_id).first()
+                price_cents = getattr(oi, "price_cents", 0) or 0
+                quantity = getattr(oi, "quantity", 0) or 0
+                line_total = price_cents * quantity
+                items.append({
+                    "order_item_id": oi.id,
+                    "name": mi.name if mi else f"Item #{oi.menu_item_id}",
+                    "quantity": quantity,
+                    "price_cents": price_cents,
+                    "line_total_cents": line_total,
+                })
+            subtotal = getattr(order, "total_cents", None)
+            if subtotal is None:
+                subtotal = sum(i["line_total_cents"] for i in items)
+            if items:
+                groups.append({
+                    "restaurant_id": order.restaurant_id,
+                    "restaurant_name": restaurant.name if restaurant else "Unknown",
+                    "order_id": order.id,
+                    "items": items,
+                    "subtotal_cents": subtotal,
+                })
+                grand_total += subtotal
+        except Exception:
+            continue
     return {"restaurants": groups, "grand_total_cents": grand_total}
 
 
@@ -891,11 +999,25 @@ def send_message(
     if payload.session_id is None:
         session = crud.create_chat_session(db, current_user.id)
     else:
-        session = (
-            db.query(models.ChatSession)
-            .filter(models.ChatSession.id == payload.session_id)
-            .first()
-        )
+        try:
+            session = (
+                db.query(models.ChatSession)
+                .filter(models.ChatSession.id == payload.session_id)
+                .first()
+            )
+        except Exception as e:
+            if "column" in str(e).lower() or "undefined" in str(e).lower():
+                try:
+                    _ensure_chat_sessions_columns()
+                except Exception:
+                    pass
+                session = (
+                    db.query(models.ChatSession)
+                    .filter(models.ChatSession.id == payload.session_id)
+                    .first()
+                )
+            else:
+                raise
         if not session or session.user_id != current_user.id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
@@ -1074,6 +1196,7 @@ def create_item(category_id: int, payload: schemas.ItemCreate, db: Session = Dep
     c = db.query(models.MenuCategory).join(models.Restaurant).filter(models.MenuCategory.id == category_id, models.Restaurant.owner_id == current_user.id).first()
     if not c:
         raise HTTPException(status_code=404, detail="Category not found")
+    tags_json = _json.dumps(payload.tags) if payload.tags else None
     item = models.MenuItem(
         category_id=category_id,
         name=payload.name,
@@ -1083,6 +1206,7 @@ def create_item(category_id: int, payload: schemas.ItemCreate, db: Session = Dep
         portion_people=payload.portion_people,
         cuisine=payload.cuisine,
         protein_type=payload.protein_type,
+        tags=tags_json,
         calories=payload.calories,
         prep_time_mins=payload.prep_time_mins,
     )
@@ -1098,7 +1222,10 @@ def update_item(item_id: int, payload: schemas.ItemUpdate, db: Session = Depends
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
     for k, v in payload.model_dump(exclude_unset=True).items():
-        setattr(item, k, v)
+        if k == "tags":
+            setattr(item, k, _json.dumps(v) if v else None)
+        else:
+            setattr(item, k, v)
     db.commit()
     db.refresh(item)
     return item
@@ -1171,6 +1298,22 @@ def owner_orders_archived(
         "per_page": per_page,
         "total_pages": (total + per_page - 1) // per_page if per_page else 1,
     }
+
+
+@app.get("/owner/restaurants/{restaurant_id}/complaints")
+def owner_complaints(
+    restaurant_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """List escalated customer feedback (rating <= 2) for restaurant dashboard."""
+    r = db.query(models.Restaurant).filter(
+        models.Restaurant.id == restaurant_id,
+        models.Restaurant.owner_id == current_user.id,
+    ).first()
+    if not r:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+    return crud.list_complaints_for_restaurant(db, restaurant_id)
 
 
 def _apply_order_filters(q, db, search, date_from, date_to):
@@ -1935,47 +2078,206 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
 
 
 # --- Customer: My Orders (track status) ---
+def _order_feedback_eligible(o) -> bool:
+    """Eligible for feedback: completed and at least 30 min since status_updated_at (proxy for delivered)."""
+    if o.status != "completed":
+        return False
+    from datetime import datetime
+    updated = o.status_updated_at or o.created_at
+    if not updated:
+        return False
+    now = datetime.utcnow()
+    try:
+        delta_seconds = (now - updated).total_seconds()
+    except TypeError:
+        return False
+    return delta_seconds >= (30 * 60)
+
+
 @app.get("/my-orders")
 def my_orders(db: Session = Depends(get_db), current_user=Depends(get_current_user_optional)):
     """Get all non-pending orders for the current customer, newest first. Returns [] when not logged in."""
     if current_user is None:
         return []
-    orders = db.query(models.Order).filter(
-        models.Order.user_id == current_user.id,
-        models.Order.status != "pending"
-    ).order_by(models.Order.created_at.desc()).limit(20).all()
+    try:
+        orders = db.query(models.Order).filter(
+            models.Order.user_id == current_user.id,
+            models.Order.status != "pending"
+        ).order_by(models.Order.created_at.desc()).limit(20).all()
+    except Exception:
+        return []
     results = []
     active_statuses = ["confirmed", "accepted", "preparing"]
     for o in orders:
-        rest = db.query(models.Restaurant).filter(models.Restaurant.id == o.restaurant_id).first()
-        items = []
-        for oi in o.items:
-            mi = db.query(models.MenuItem).filter(models.MenuItem.id == oi.menu_item_id).first()
-            items.append({"name": mi.name if mi else "?", "quantity": oi.quantity, "price_cents": oi.price_cents})
+        try:
+            rest = db.query(models.Restaurant).filter(models.Restaurant.id == o.restaurant_id).first()
+            items = []
+            for oi in o.items:
+                mi = db.query(models.MenuItem).filter(models.MenuItem.id == oi.menu_item_id).first()
+                items.append({
+                    "name": mi.name if mi else "?",
+                    "quantity": getattr(oi, "quantity", 0),
+                    "price_cents": getattr(oi, "price_cents", 0),
+                })
 
-        # Queue position for active orders
-        queue_position = 0
-        if o.status in active_statuses:
-            queue_position = db.query(models.Order).filter(
-                models.Order.restaurant_id == o.restaurant_id,
-                models.Order.status.in_(active_statuses),
-                models.Order.created_at < o.created_at,
-                models.Order.id != o.id,
-            ).count() + 1
+            queue_position = 0
+            if o.status in active_statuses and getattr(o, "created_at", None) is not None:
+                queue_position = db.query(models.Order).filter(
+                    models.Order.restaurant_id == o.restaurant_id,
+                    models.Order.status.in_(active_statuses),
+                    models.Order.created_at < o.created_at,
+                    models.Order.id != o.id,
+                ).count() + 1
 
-        results.append({
-            "id": o.id,
-            "status": o.status,
-            "total_cents": o.total_cents,
-            "created_at": o.created_at.isoformat(),
-            "restaurant_name": rest.name if rest else "?",
-            "restaurant_id": o.restaurant_id,
-            "items": items,
-            "estimated_ready_at": o.estimated_ready_at.isoformat() if o.estimated_ready_at else None,
-            "status_updated_at": o.status_updated_at.isoformat() if o.status_updated_at else None,
-            "queue_position": queue_position,
-        })
+            feedback = crud.get_feedback_by_order(db, o.id)
+            feedback_eligible = _order_feedback_eligible(o) and feedback is None
+
+            created_at = o.created_at.isoformat() if getattr(o, "created_at", None) else None
+            estimated_ready_at = o.estimated_ready_at.isoformat() if getattr(o, "estimated_ready_at", None) else None
+            status_updated_at = o.status_updated_at.isoformat() if getattr(o, "status_updated_at", None) else None
+            results.append({
+                "id": o.id,
+                "status": o.status,
+                "total_cents": getattr(o, "total_cents", 0),
+                "created_at": created_at,
+                "restaurant_name": rest.name if rest else "?",
+                "restaurant_id": o.restaurant_id,
+                "items": items,
+                "estimated_ready_at": estimated_ready_at,
+                "status_updated_at": status_updated_at,
+                "queue_position": queue_position,
+                "feedback_eligible": feedback_eligible,
+                "feedback": {"id": feedback.id, "rating": feedback.rating} if feedback else None,
+            })
+        except Exception:
+            continue
     return results
+
+
+# --- Post-Order Feedback ---
+@app.post("/feedback", response_model=schemas.FeedbackOut)
+def submit_feedback(
+    payload: schemas.FeedbackCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Submit post-order feedback. Order must be completed, belong to user, and not already have feedback."""
+    order = crud.get_order(db, payload.order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your order")
+    if order.status != "completed":
+        raise HTTPException(status_code=400, detail="Can only give feedback for completed orders")
+    if crud.get_feedback_by_order(db, order.id):
+        raise HTTPException(status_code=400, detail="Feedback already submitted for this order")
+    fb = crud.create_feedback(
+        db, current_user.id, payload.order_id, payload.rating,
+        issues=payload.issues, comment=payload.comment,
+    )
+    import json
+    return schemas.FeedbackOut(
+        id=fb.id,
+        order_id=fb.order_id,
+        rating=fb.rating,
+        issues=json.loads(fb.issues) if fb.issues else [],
+        comment=fb.comment,
+        photo_url=fb.photo_url,
+        created_at=fb.created_at,
+        escalated=fb.rating <= 2,
+    )
+
+
+@app.get("/orders/{order_id}/feedback")
+def get_order_feedback(
+    order_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Get feedback for an order (owner or the customer who placed it)."""
+    order = crud.get_order(db, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.user_id != current_user.id and current_user.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    fb = crud.get_feedback_by_order(db, order_id)
+    if not fb:
+        return None
+    import json
+    return {
+        "id": fb.id,
+        "order_id": fb.order_id,
+        "rating": fb.rating,
+        "issues": json.loads(fb.issues) if fb.issues else [],
+        "comment": fb.comment,
+        "photo_url": fb.photo_url,
+        "created_at": fb.created_at.isoformat(),
+        "escalated": fb.rating <= 2,
+    }
+
+
+# --- Taste Profile (AI Flavor / Recommendations) ---
+def _taste_profile_to_out(profile):
+    import json
+    return schemas.TasteProfileOut(
+        id=profile.id,
+        user_id=profile.user_id,
+        spice_level=profile.spice_level or "medium",
+        diet=profile.diet,
+        liked_cuisines=json.loads(profile.liked_cuisines) if profile.liked_cuisines else [],
+        disliked_tags=profile.disliked_tags,
+        created_at=profile.created_at,
+        updated_at=profile.updated_at,
+    )
+
+
+@app.get("/taste/profile", response_model=schemas.TasteProfileOut)
+def get_taste_profile(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Get current user's taste profile. Creates one with defaults if missing."""
+    profile = crud.get_taste_profile(db, current_user.id)
+    if not profile:
+        profile = crud.upsert_taste_profile(db, current_user.id)
+    return _taste_profile_to_out(profile)
+
+
+@app.put("/taste/profile", response_model=schemas.TasteProfileOut)
+def update_taste_profile(
+    payload: schemas.TasteProfileUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Update current user's taste preferences."""
+    profile = crud.upsert_taste_profile(
+        db,
+        current_user.id,
+        spice_level=payload.spice_level,
+        diet=payload.diet,
+        liked_cuisines=payload.liked_cuisines,
+        disliked_tags=payload.disliked_tags,
+    )
+    return _taste_profile_to_out(profile)
+
+
+@app.get("/taste/history-summary", response_model=schemas.TasteHistorySummaryOut)
+def get_taste_history_summary(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Build taste vector from completed orders (cuisine/protein counts, ordered item ids)."""
+    return crud.get_order_history_taste_summary(db, current_user.id)
+
+
+@app.get("/taste/recommendations", response_model=list[schemas.TasteRecommendationOut])
+def get_taste_recommendations(
+    limit: int = 10,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Personalized recommendations based on taste profile and order history."""
+    return crud.get_taste_recommendations(db, current_user.id, limit=min(limit, 20))
 
 
 # --- /me endpoint ---
