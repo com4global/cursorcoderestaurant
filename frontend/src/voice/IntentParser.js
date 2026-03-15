@@ -26,6 +26,13 @@ const SPICE_LEVELS = ['extra spicy', 'not spicy', 'less spicy', 'spicy', 'mild',
 const CUISINES = ['south indian', 'north indian', 'indo-chinese', 'indian', 'chinese', 'italian', 'mexican', 'thai', 'japanese', 'american', 'mediterranean', 'korean', 'mughlai'];
 const DIETS = ['vegetarian', 'vegan', 'non-veg', 'non veg', 'halal', 'gluten-free', 'keto', 'low-carb', 'jain', 'veg'];
 
+// Words that mean menu categories/sections — don't treat as restaurant name when user says e.g. "drinks"
+const CATEGORY_LIKE_WORDS = new Set([
+    'drinks', 'beverages', 'starters', 'mains', 'main', 'desserts', 'dessert',
+    'appetizers', 'appetizer', 'sides', 'side', 'specials', 'combo', 'combos',
+    'family', 'kids', 'breakfast', 'lunch', 'dinner', 'snacks', 'soups', 'salads',
+]);
+
 // ─── Intent types ───────────────────────────────────────────────────
 export const INTENTS = {
     NEW_SEARCH: 'NEW_SEARCH',           // "cheap biryani" — fresh food search
@@ -252,8 +259,9 @@ export function parseIntent(text, convState = {}, restaurants = []) {
             }
         }
 
-        // Also check if the entire input IS a restaurant name
-        const directMatch = fuzzyMatchRestaurant(t, restaurants);
+        // Also check if the entire input IS a restaurant name (skip if it's a category word like "drinks")
+        const isCategoryLike = CATEGORY_LIKE_WORDS.has(t) || (t.split(/\s+/).length === 1 && [...CATEGORY_LIKE_WORDS].some(w => w.includes(t) || t.includes(w)));
+        const directMatch = isCategoryLike ? null : fuzzyMatchRestaurant(t, restaurants);
         if (directMatch && !extractDish(t)) {
             result.intent = INTENTS.CHANGE_RESTAURANT;
             result.restaurantMatch = directMatch;

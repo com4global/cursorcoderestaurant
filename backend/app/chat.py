@@ -491,6 +491,74 @@ def _compute_item_score(query: str, item: MenuItem) -> float:
     return max(token_score * 0.9, seq_score)
 
 
+def _has_add_intent(text: str) -> bool:
+    """True if the message clearly asks to add/order something (not just browse)."""
+    lower = text.lower().strip()
+    add_phrases = (
+        "add", "get me", "give me", "i want", "i'd like", "order", "can i have",
+        "can i get", "one ", "two ", "1 ", "2 ", "a ", "an ",
+    )
+    return any(p in lower for p in add_phrases)
+
+
+def _try_category_match(cleaned: str, lower: str, categories: list, session) -> "Category | None":
+    """Match user input to a category (for browse/open menu). Returns category or None."""
+    category_query = lower
+    for prefix in (
+        "show me ", "show ", "open ", "open the ", "browse ", "display ", "see ",
+        "i want to see ", "i want ", "can i see ", "let me see ", "give me the ",
+    ):
+        if category_query.startswith(prefix):
+            category_query = category_query[len(prefix):].strip()
+            break
+    category_query = category_query.strip()
+    input_words = category_query.split() if category_query else lower.split()
+    q = category_query or lower
+
+    cat_match = None
+    for cat in categories:
+        if cat.name.lower() == lower or str(cat.id) == lower or (category_query and cat.name.lower() == category_query):
+            cat_match = cat
+            break
+    if not cat_match and len(input_words) >= 1:
+        for cat in categories:
+            cat_lower = cat.name.lower()
+            cat_words = [w.strip() for w in cat_lower.replace("/", " ").split() if w.strip()]
+            for iw in input_words:
+                if len(iw) < 2:
+                    continue
+                for cw in cat_words:
+                    if iw in cw or cw in iw or _similarity(iw, cw) >= 0.7:
+                        cat_match = cat
+                        break
+                if cat_match:
+                    break
+            if cat_match:
+                break
+    if not cat_match:
+        best_cat, best_score = None, 0.0
+        for cat in categories:
+            cat_lower = cat.name.lower()
+            score = max(_similarity(q, cat_lower), _similarity(lower, cat_lower))
+            for word in cat_lower.replace("/", " ").split():
+                word = word.strip()
+                if word:
+                    for iw in input_words:
+                        score = max(score, _similarity(q, word), _similarity(iw, word))
+            if score > best_score:
+                best_score = score
+                best_cat = cat
+        if best_cat:
+            cat_words = len(best_cat.name.split())
+            if best_score >= 0.55 and len(input_words) <= max(cat_words, 1):
+                cat_match = best_cat
+    if not cat_match and not (session.category_id and len(cleaned.split()) >= 2):
+        cat_match = _llm_match_category(cleaned, categories)
+    if cat_match and session.category_id and cat_match.id == session.category_id:
+        cat_match = None
+    return cat_match
+
+
 def _find_best_item(query: str, all_items: list[MenuItem]) -> MenuItem | None:
     """Find the single best matching item. Higher threshold for voice accuracy."""
     query_lower = query.lower().strip()
@@ -1027,6 +1095,22 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
     categories = crud.list_categories(db, session.restaurant_id)
     category_items = [i for i in all_items if session.category_id and i.category_id == session.category_id]
 
+    # Short vague queries (e.g. "family means" / "family meals"): try category first so we open that menu instead of adding one item
+    if len(cleaned.split()) <= 2 and not _has_add_intent(cleaned):
+        cat_match_early = _try_category_match(cleaned, lower, categories, session)
+        if cat_match_early:
+            _set_session_state(db, session, category_id=cat_match_early.id)
+            items = _items_data(db, cat_match_early.id)
+            return _result(
+                f"{cat_match_early.name} — {len(items)} items. Tap + to add or tell me the item name.",
+                restaurant_id=session.restaurant_id,
+                category_id=cat_match_early.id,
+                order_id=session.order_id,
+                categories=_categories_data(db, session.restaurant_id),
+                items=items,
+                voice_prompt=f"{cat_match_early.name}. {len(items)} items. Which one would you like?",
+            )
+
     # When user is viewing a category's items: try FAST path first (fuzzy/token), LLM only as fallback
     # so e.g. "iced coffee" -> instant match; "I would like one iced coffee" -> parse_order_items or LLM
     item_parsed = []
@@ -1098,62 +1182,8 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             voice_prompt=f"Added {voice_added}. Want anything else, or say done to finish?",
         )
 
-    # --- No item match: try CATEGORY match (so user can say "starters" to switch category) ---
-    cat_match = None
-    category_query = lower
-    for prefix in (
-        "show me ", "show ", "open ", "open the ", "browse ", "display ", "see ",
-        "i want to see ", "i want ", "can i see ", "let me see ", "give me the ",
-    ):
-        if category_query.startswith(prefix):
-            category_query = category_query[len(prefix):].strip()
-            break
-    category_query = category_query.strip()
-    input_words = category_query.split() if category_query else lower.split()
-    q = category_query or lower
-
-    for cat in categories:
-        if cat.name.lower() == lower or str(cat.id) == lower or (category_query and cat.name.lower() == category_query):
-            cat_match = cat
-            break
-    if not cat_match and len(input_words) == 1:
-        for cat in categories:
-            cat_lower = cat.name.lower()
-            cat_words = [w.strip() for w in cat_lower.replace("/", " ").split()]
-            iw = input_words[0]
-            for cw in cat_words:
-                if len(iw) >= 2 and (iw in cw or cw in iw):
-                    cat_match = cat
-                    break
-                if len(iw) >= 2 and _similarity(iw, cw) >= 0.7:
-                    cat_match = cat
-                    break
-            if cat_match:
-                break
-    if not cat_match:
-        best_cat, best_score = None, 0.0
-        for cat in categories:
-            cat_lower = cat.name.lower()
-            score = max(_similarity(q, cat_lower), _similarity(lower, cat_lower))
-            if len(input_words) == 1:
-                for word in cat_lower.replace("/", " ").split():
-                    word = word.strip()
-                    if word:
-                        score = max(score, _similarity(q, word), _similarity(input_words[0], word))
-            if score > best_score:
-                best_score = score
-                best_cat = cat
-        # Only treat as category if input isn't more specific than category name (e.g. "iced coffee" vs "Coffee" = item)
-        cat_words = len(best_cat.name.split()) if best_cat else 0
-        if best_score >= 0.55 and len(input_words) <= cat_words:
-            cat_match = best_cat
-    # When already in a category, don't use LLM for multi-word input — likely an item name ("iced coffee")
-    if not cat_match and not (session.category_id and len(cleaned.split()) >= 2):
-        cat_match = _llm_match_category(cleaned, categories)
-
-    # Do not re-select the same category (e.g. "iced coffee" matched category "Coffee")
-    if cat_match and session.category_id and cat_match.id == session.category_id:
-        cat_match = None
+    # --- No item match: try CATEGORY match (so user can say "starters" or "family meals" to open that menu) ---
+    cat_match = _try_category_match(cleaned, lower, categories, session)
 
     if cat_match:
         _set_session_state(db, session, category_id=cat_match.id)
@@ -1182,11 +1212,12 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             voice_prompt=f"We have these categories: {cat_list}. Which one would you like?",
         )
 
-    # --- Submit order ---
+    # --- Submit order / negative response ("no" = nothing else) ---
     if lower in ("#order", "submit", "submit order", "place order", "done",
                  "checkout", "check out", "that's all", "thats all", "confirm",
                  "place my order", "send order", "i'm done", "im done",
-                 "finished", "that is all", "no more", "nothing else"):
+                 "finished", "that is all", "no more", "nothing else",
+                 "no", "nope", "nah", "no thanks", "no thank you"):
         if session.order_id is None:
             cats = _categories_data(db, session.restaurant_id)
             cat_list = _build_voice_category_list(cats)
