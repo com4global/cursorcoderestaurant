@@ -202,3 +202,37 @@ class Payment(Base):
 
     user = relationship("User", backref="payments")
 
+
+# --- Group Ordering ---
+
+class GroupOrderSession(Base):
+    """A group order session: one share link, many members with preferences."""
+    __tablename__ = "group_order_sessions"
+
+    id = Column(Integer, primary_key=True)
+    share_code = Column(String(20), unique=True, index=True, nullable=False)  # e.g. "8734" for app.com/group/8734
+    creator_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # optional: logged-in creator
+    status = Column(String(40), default="active", nullable=False)  # active, closed, ordered
+    delivery_address_zipcode = Column(String(10), nullable=True)  # optional for distance scoring
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    creator = relationship("User", backref="group_sessions_created")
+    members = relationship("GroupOrderMember", back_populates="group_session", cascade="all, delete-orphan")
+
+
+class GroupOrderMember(Base):
+    """A member in a group order: name, preference, budget, dietary restrictions."""
+    __tablename__ = "group_order_members"
+
+    id = Column(Integer, primary_key=True)
+    group_session_id = Column(Integer, ForeignKey("group_order_sessions.id"), nullable=False)
+    name = Column(String(120), nullable=False)
+    preference = Column(String(200), nullable=True)  # e.g. "biryani", "veg", "spicy"
+    budget_cents = Column(Integer, nullable=True)  # max spend per person
+    dietary_restrictions = Column(String(200), nullable=True)  # e.g. "vegetarian", "no dairy"
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # optional: link to app user
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    group_session = relationship("GroupOrderSession", back_populates="members")
+    user = relationship("User", backref="group_memberships")
+

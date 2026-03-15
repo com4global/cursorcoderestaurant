@@ -195,6 +195,7 @@ class ChatMessageOut(BaseModel):
     items: list[dict] | None = None
     cart_summary: dict | None = None
     voice_prompt: str | None = None
+    open_group_tab: bool | None = None  # True when user asked for group order → frontend opens Group tab
 
 
 # --- Cart schemas ---
@@ -404,3 +405,76 @@ class ComplaintOut(BaseModel):
     restaurant_id: int
     restaurant_name: str
     order_items_summary: str
+
+
+# --- Group Ordering ---
+
+class GroupOrderSessionCreate(BaseModel):
+    """Create a new group order session (optional: zipcode for distance)."""
+    delivery_zipcode: str | None = None
+
+
+class GroupOrderMemberIn(BaseModel):
+    """Payload when joining a group: name, preference, budget, dietary restrictions."""
+    name: str = Field(min_length=1, max_length=120)
+    preference: str | None = Field(None, max_length=200)
+    budget_cents: int | None = Field(None, ge=0)
+    dietary_restrictions: str | None = Field(None, max_length=200)
+
+
+class GroupOrderMemberOut(BaseModel):
+    id: int
+    name: str
+    preference: str | None
+    budget_cents: int | None
+    dietary_restrictions: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class GroupOrderSessionOut(BaseModel):
+    id: int
+    share_code: str
+    status: str
+    delivery_address_zipcode: str | None
+    created_at: datetime
+    members: list[GroupOrderMemberOut] = []
+
+    model_config = {"from_attributes": True}
+
+
+class GroupOrderRecommendationItem(BaseModel):
+    """A suggested dish for the group."""
+    item_id: int
+    name: str
+    price_cents: int
+    quantity: int = 1
+    portion_people: int | None = None
+
+
+class GroupOrderRecommendationOut(BaseModel):
+    """AI consensus: best restaurant + suggested dishes for the group."""
+    restaurant_id: int
+    restaurant_name: str
+    suggested_items: list[GroupOrderRecommendationItem]
+    total_cents: int
+    estimated_per_person_cents: int
+    reasons: list[str]  # e.g. "Within everyone's budget", "Veg option available"
+    group_discount_message: str | None = None  # e.g. "Add $2 more for free delivery"
+
+
+class GroupOrderSplitMember(BaseModel):
+    """Per-member split: name and amount in cents."""
+    member_name: str
+    amount_cents: int
+    item_total_cents: int  # for item-based; same as amount_cents for equal
+    delivery_share_cents: int
+
+
+class GroupOrderSplitOut(BaseModel):
+    """Bill split result: total and per-member amounts."""
+    total_cents: int
+    delivery_cents: int = 0
+    tax_cents: int = 0
+    split_mode: str  # "equal" | "item"
+    members: list[GroupOrderSplitMember]

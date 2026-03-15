@@ -9,11 +9,11 @@ import urllib.parse
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, File, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
-from . import chat, crud, intent_extractor, models, optimizer, payments, schemas
+from . import chat, crud, group_consensus, intent_extractor, models, optimizer, payments, schemas
 from .auth import create_access_token, get_current_user, get_current_user_optional, verify_password
 from .config import settings
 from .db import get_db, engine
@@ -1035,6 +1035,7 @@ def send_message(
         items=result.get("items"),
         cart_summary=result.get("cart_summary"),
         voice_prompt=result.get("voice_prompt"),
+        open_group_tab=result.get("open_group_tab"),
     )
 
 
@@ -2214,6 +2215,214 @@ def get_order_feedback(
         "created_at": fb.created_at.isoformat(),
         "escalated": fb.rating <= 2,
     }
+
+
+# --- Group Ordering ---
+
+@app.post("/group/session", response_model=schemas.GroupOrderSessionOut)
+def create_group_session(
+    payload: schemas.GroupOrderSessionCreate | None = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user_optional),
+):
+    """Create a new group order session. Returns share_code and share link. Auth optional."""
+    payload = payload or schemas.GroupOrderSessionCreate()
+    session = crud.create_group_order_session(
+        db,
+        creator_user_id=current_user.id if current_user else None,
+        delivery_zipcode=payload.delivery_zipcode,
+    )
+    members_out = [
+        schemas.GroupOrderMemberOut(
+            id=m.id,
+            name=m.name,
+            preference=m.preference,
+            budget_cents=m.budget_cents,
+            dietary_restrictions=m.dietary_restrictions,
+        )
+        for m in session.members
+    ]
+    return schemas.GroupOrderSessionOut(
+        id=session.id,
+        share_code=session.share_code,
+        status=session.status,
+        delivery_address_zipcode=session.delivery_address_zipcode,
+        created_at=session.created_at,
+        members=members_out,
+    )
+
+
+@app.get("/group/{group_id_or_code}", response_model=schemas.GroupOrderSessionOut)
+def get_group_session(
+    group_id_or_code: str,
+    db: Session = Depends(get_db),
+):
+    """Get group session by id or share code. No auth required (for share link)."""
+    session = crud.get_group_session_by_id_or_code(db, group_id_or_code)
+    if not session:
+        raise HTTPException(status_code=404, detail="Group not found")
+    members_out = [
+        schemas.GroupOrderMemberOut(
+            id=m.id,
+            name=m.name,
+            preference=m.preference,
+            budget_cents=m.budget_cents,
+            dietary_restrictions=m.dietary_restrictions,
+        )
+        for m in session.members
+    ]
+    return schemas.GroupOrderSessionOut(
+        id=session.id,
+        share_code=session.share_code,
+        status=session.status,
+        delivery_address_zipcode=session.delivery_address_zipcode,
+        created_at=session.created_at,
+        members=members_out,
+    )
+
+
+@app.post("/group/{group_id_or_code}/join", response_model=schemas.GroupOrderMemberOut)
+def join_group_session(
+    group_id_or_code: str,
+    payload: schemas.GroupOrderMemberIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user_optional),
+):
+    """Join a group order: add yourself (name, preference, budget, dietary). No auth required."""
+    session = crud.get_group_session_by_id_or_code(db, group_id_or_code)
+    if not session:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if session.status != "active":
+        raise HTTPException(status_code=400, detail="Group order is no longer active")
+    member = crud.add_group_member(
+        db,
+        session.id,
+        name=payload.name,
+        preference=payload.preference,
+        budget_cents=payload.budget_cents,
+        dietary_restrictions=payload.dietary_restrictions,
+        user_id=current_user.id if current_user else None,
+    )
+    return schemas.GroupOrderMemberOut(
+        id=member.id,
+        name=member.name,
+        preference=member.preference,
+        budget_cents=member.budget_cents,
+        dietary_restrictions=member.dietary_restrictions,
+    )
+
+
+@app.get("/group/{group_id_or_code}/recommendation", response_model=schemas.GroupOrderRecommendationOut)
+def get_group_recommendation(
+    group_id_or_code: str,
+    lat: float | None = None,
+    lng: float | None = None,
+    restaurant_ids: str | None = None,
+    cuisine: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Get AI consensus: best restaurant and suggested dishes for the group. No auth required.
+    By default searches across all restaurants. Optional: restaurant_ids (comma-separated, e.g. 1,2,3),
+    cuisine (e.g. Indian - only restaurants with that cuisine)."""
+    session = crud.get_group_session_by_id_or_code(db, group_id_or_code)
+    if not session:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if not session.members:
+        raise HTTPException(status_code=400, detail="Add at least one member to get a recommendation")
+    ids_list = None
+    if restaurant_ids and restaurant_ids.strip():
+        try:
+            ids_list = [int(x.strip()) for x in restaurant_ids.split(",") if x.strip()]
+        except ValueError:
+            ids_list = []
+        if not ids_list:
+            ids_list = None
+    result = group_consensus.get_group_recommendation(
+        db, session, lat=lat, lng=lng,
+        restaurant_ids=ids_list, cuisine=cuisine,
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="No restaurant found that fits the group preferences")
+    return schemas.GroupOrderRecommendationOut(
+        restaurant_id=result["restaurant_id"],
+        restaurant_name=result["restaurant_name"],
+        suggested_items=[schemas.GroupOrderRecommendationItem(**x) for x in result["suggested_items"]],
+        total_cents=result["total_cents"],
+        estimated_per_person_cents=result["estimated_per_person_cents"],
+        reasons=result["reasons"],
+        group_discount_message=result.get("group_discount_message"),
+    )
+
+
+class GroupSplitRequest(BaseModel):
+    """For item-based split: total, delivery, tax, and per-member item totals."""
+    total_cents: int = Field(ge=0)
+    delivery_cents: int = Field(ge=0, default=0)
+    tax_cents: int = Field(ge=0, default=0)
+    mode: str = "equal"  # equal | item
+    member_item_cents: list[dict] | None = None  # [{"member_name": "Alex", "item_total_cents": 1400}]
+
+
+@app.get("/group/{group_id_or_code}/split", response_model=schemas.GroupOrderSplitOut)
+def get_group_split(
+    group_id_or_code: str,
+    total_cents: int,
+    delivery_cents: int = 0,
+    tax_cents: int = 0,
+    mode: str = "equal",
+    db: Session = Depends(get_db),
+):
+    """Get bill split (equal or item-based). For item-based use POST with member_item_cents."""
+    session = crud.get_group_session_by_id_or_code(db, group_id_or_code)
+    if not session:
+        raise HTTPException(status_code=404, detail="Group not found")
+    members = list(session.members)
+    if not members:
+        raise HTTPException(status_code=400, detail="No members in group")
+    split_result = group_consensus.compute_group_split(
+        total_cents, delivery_cents, tax_cents, members, mode=mode,
+    )
+    return schemas.GroupOrderSplitOut(
+        total_cents=split_result["total_cents"],
+        delivery_cents=split_result["delivery_cents"],
+        tax_cents=split_result["tax_cents"],
+        split_mode=split_result["split_mode"],
+        members=[schemas.GroupOrderSplitMember(**m) for m in split_result["members"]],
+    )
+
+
+@app.post("/group/{group_id_or_code}/split", response_model=schemas.GroupOrderSplitOut)
+def post_group_split_item_based(
+    group_id_or_code: str,
+    payload: GroupSplitRequest,
+    db: Session = Depends(get_db),
+):
+    """Get item-based bill split. Body: total_cents, delivery_cents, tax_cents, member_item_cents."""
+    session = crud.get_group_session_by_id_or_code(db, group_id_or_code)
+    if not session:
+        raise HTTPException(status_code=404, detail="Group not found")
+    members = list(session.members)
+    if not members:
+        raise HTTPException(status_code=400, detail="No members in group")
+    item_assignments = None
+    if payload.mode == "item" and payload.member_item_cents:
+        name_to_cents = {x["member_name"]: x["item_total_cents"] for x in payload.member_item_cents}
+        item_assignments = [(m.name, name_to_cents.get(m.name, 0)) for m in members]
+    split_result = group_consensus.compute_group_split(
+        payload.total_cents,
+        payload.delivery_cents,
+        payload.tax_cents,
+        members,
+        mode=payload.mode,
+        item_assignments=item_assignments,
+    )
+    return schemas.GroupOrderSplitOut(
+        total_cents=split_result["total_cents"],
+        delivery_cents=split_result["delivery_cents"],
+        tax_cents=split_result["tax_cents"],
+        split_mode=split_result["split_mode"],
+        members=[schemas.GroupOrderSplitMember(**m) for m in split_result["members"]],
+    )
 
 
 # --- Taste Profile (AI Flavor / Recommendations) ---

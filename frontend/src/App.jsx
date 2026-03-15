@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, submitFeedback, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, verifyPayment, trackOrder, getRestaurantQueue, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal, fetchCategoryItems } from "./api.js";
+import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, submitFeedback, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, verifyPayment, trackOrder, getRestaurantQueue, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal, fetchCategoryItems, createGroupSession, getGroupSession, joinGroupSession, getGroupRecommendation, getGroupSplitEqual } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
 import TasteProfile from "./TasteProfile.jsx";
 import { useVoiceController } from "./voice/useVoiceController.js";
@@ -287,6 +287,24 @@ export default function App() {
   const [optLoading, setOptLoading] = useState(false);
   const [optError, setOptError] = useState("");
 
+  // Group Order
+  const [groupSession, setGroupSession] = useState(null);
+  const [groupJoinCodeInput, setGroupJoinCodeInput] = useState("");
+  const [groupViewSession, setGroupViewSession] = useState(null);
+  const [groupRecommendation, setGroupRecommendation] = useState(null);
+  const [groupSplit, setGroupSplit] = useState(null);
+  const [groupJoinName, setGroupJoinName] = useState("");
+  const [groupJoinPref, setGroupJoinPref] = useState("");
+  const [groupJoinBudget, setGroupJoinBudget] = useState("");
+  const [groupJoinDiet, setGroupJoinDiet] = useState("");
+  const [groupJoinLoading, setGroupJoinLoading] = useState(false);
+  const [groupRecLoading, setGroupRecLoading] = useState(false);
+  const [groupAddToCartLoading, setGroupAddToCartLoading] = useState(false);
+  const [groupStatus, setGroupStatus] = useState("");
+  const [groupPreferRestaurantIds, setGroupPreferRestaurantIds] = useState([]);
+  const [groupPreferCuisine, setGroupPreferCuisine] = useState("");
+  const [groupRestaurantOptions, setGroupRestaurantOptions] = useState([]);
+
   // ===================== EFFECTS =====================
 
   useEffect(() => {
@@ -308,6 +326,22 @@ export default function App() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Group order: open tab and load session from hash (#group/8734)
+  useEffect(() => {
+    const hash = window.location.hash || "";
+    const m = hash.match(/^#?group\/([^/]+)/);
+    if (m) {
+      setTab("group");
+      getGroupSession(m[1]).then(setGroupViewSession).catch(() => {});
+    }
+  }, []);
+
+  // Load restaurant list for group recommendation preference (when group session exists)
+  useEffect(() => {
+    if (tab !== "group" || (!groupSession && !groupViewSession)) return;
+    listRestaurants().then(setGroupRestaurantOptions).catch(() => setGroupRestaurantOptions([]));
+  }, [tab, groupSession, groupViewSession]);
 
   // Handle Stripe payment redirect URL params
   useEffect(() => {
@@ -1020,6 +1054,11 @@ export default function App() {
       if (res.cart_summary) setCartData(res.cart_summary);
       if (text.trim().startsWith("add:")) {
         setTimeout(() => { fetchCart(token).then(setCartData).catch(() => { }); }, 300);
+      }
+
+      // Group order intent: open Group tab (voice or text)
+      if (res.open_group_tab) {
+        setTab("group");
       }
 
       // Update selectedRestaurant from backend response (for voice-driven restaurant switching)
@@ -2028,6 +2067,359 @@ export default function App() {
           </motion.div>
         )}
 
+        {/* ====== GROUP ORDER TAB ====== */}
+        {tab === "group" && (
+          <motion.div className="group-order-page" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+            <div className="group-order-title">👥 Group Order</div>
+
+            {!groupSession && !groupViewSession && (
+              <>
+                <div className="group-order-section">
+                  <div className="group-order-section-title">Start a group order</div>
+                  <button
+                    type="button"
+                    className="group-order-btn primary"
+                    onClick={async () => {
+                      setGroupStatus("Creating…");
+                      try {
+                        const session = await createGroupSession(token || null, {});
+                        setGroupSession(session);
+                        setGroupStatus("");
+                      } catch (e) {
+                        setGroupStatus(e?.message || "Failed to create session");
+                      }
+                    }}
+                  >
+                    Start Group Order
+                  </button>
+                </div>
+                <div className="group-order-section">
+                  <div className="group-order-section-title">Join with code</div>
+                  <input
+                    type="text"
+                    className="group-order-input"
+                    placeholder="Enter group code (e.g. 8734)"
+                    value={groupJoinCodeInput}
+                    onChange={(e) => setGroupJoinCodeInput(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="group-order-btn"
+                    onClick={async () => {
+                      const code = groupJoinCodeInput.trim();
+                      if (!code) return;
+                      setGroupStatus("Loading…");
+                      try {
+                        const session = await getGroupSession(code);
+                        setGroupViewSession(session);
+                        setGroupStatus("");
+                      } catch (e) {
+                        setGroupStatus(e?.message || "Group not found");
+                      }
+                    }}
+                  >
+                    Join Group
+                  </button>
+                </div>
+              </>
+            )}
+
+            {groupSession && (
+              <div className="group-order-section">
+                <div className="group-order-section-title">Share with friends</div>
+                <div className="group-order-share-box">
+                  <span className="group-order-share-label">Link:</span>
+                  <span className="group-order-share-link">{window.location.origin}/#group/{groupSession.share_code}</span>
+                  <button
+                    type="button"
+                    className="group-order-copy-btn"
+                    onClick={() => {
+                      navigator.clipboard.writeText(`${window.location.origin}/#group/${groupSession.share_code}`);
+                      setGroupStatus("Link copied!");
+                      setTimeout(() => setGroupStatus(""), 2000);
+                    }}
+                  >
+                    Copy
+                  </button>
+                </div>
+                <div className="group-order-members-title">Members ({groupSession.members?.length || 0})</div>
+                {groupSession.members?.length ? (
+                  <ul className="group-order-members-list">
+                    {groupSession.members.map((m) => (
+                      <li key={m.id}>{m.name} – {m.preference || "—"} {m.budget_cents != null ? `$${(m.budget_cents / 100).toFixed(0)}` : ""} {m.dietary_restrictions || ""}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="group-order-hint">Share the link; friends will add their preferences here.</div>
+                )}
+                <div className="group-order-section-title" style={{ marginTop: 16 }}>Restaurant preference (optional)</div>
+                <div className="group-order-hint">By default we search all restaurants. Select one or more to limit the AI to those only:</div>
+                <div className="group-order-restaurant-checkboxes">
+                  {groupRestaurantOptions.map((r) => (
+                    <label key={r.id} className="group-order-checkbox-label">
+                      <input
+                        type="checkbox"
+                        checked={groupPreferRestaurantIds.includes(r.id)}
+                        onChange={() => setGroupPreferRestaurantIds((prev) => prev.includes(r.id) ? prev.filter((x) => x !== r.id) : [...prev, r.id])}
+                      />
+                      <span>{r.name}</span>
+                    </label>
+                  ))}
+                </div>
+                <input
+                  type="text"
+                  className="group-order-input"
+                  placeholder="Prefer cuisine (e.g. Indian, Italian)"
+                  value={groupPreferCuisine}
+                  onChange={(e) => setGroupPreferCuisine(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="group-order-btn"
+                  onClick={async () => {
+                    setGroupRecLoading(true);
+                    try {
+                      const rec = await getGroupRecommendation(groupSession.share_code, {
+                        restaurantIds: groupPreferRestaurantIds.length > 0 ? groupPreferRestaurantIds : undefined,
+                        cuisine: groupPreferCuisine.trim() || undefined,
+                      });
+                      setGroupRecommendation(rec);
+                      if (rec?.total_cents != null && groupSession.members?.length) {
+                        const split = await getGroupSplitEqual(groupSession.share_code, rec.total_cents, 600, 400);
+                        setGroupSplit(split);
+                      }
+                    } catch (e) {
+                      setGroupStatus(e?.message || "No recommendation found");
+                    } finally {
+                      setGroupRecLoading(false);
+                    }
+                  }}
+                  disabled={!groupSession.members?.length || groupRecLoading}
+                >
+                  {groupRecLoading ? "Finding…" : "Get AI Recommendation"}
+                </button>
+                {groupRecommendation && (
+                  <div className="group-order-recommendation">
+                    <div className="group-order-rec-title">Best: {groupRecommendation.restaurant_name}</div>
+                    <ul className="group-order-rec-items">
+                      {groupRecommendation.suggested_items?.map((it, i) => (
+                        <li key={i}>{it.quantity}x {it.name} – ${(it.price_cents * it.quantity / 100).toFixed(2)}</li>
+                      ))}
+                    </ul>
+                    <div className="group-order-rec-total">Total: ${(groupRecommendation.total_cents / 100).toFixed(2)} · ~${(groupRecommendation.estimated_per_person_cents / 100).toFixed(2)}/person</div>
+                    {groupRecommendation.reasons?.length > 0 && (
+                      <div className="group-order-rec-reasons">{groupRecommendation.reasons.join(" · ")}</div>
+                    )}
+                    {groupRecommendation.group_discount_message && (
+                      <div className="group-order-rec-discount">{groupRecommendation.group_discount_message}</div>
+                    )}
+                  </div>
+                )}
+                {groupSplit && (
+                  <div className="group-order-split">
+                    <div className="group-order-split-title">Bill split (equal)</div>
+                    {groupSplit.members?.map((m, i) => (
+                      <div key={i} className="group-order-split-row">{m.member_name}: ${(m.amount_cents / 100).toFixed(2)}</div>
+                    ))}
+                  </div>
+                )}
+                {groupRecommendation && (
+                  <button
+                    type="button"
+                    className="group-order-btn primary"
+                    style={{ marginTop: 12 }}
+                    disabled={groupAddToCartLoading || !token}
+                    onClick={async () => {
+                      if (!token) { setTab("profile"); setGroupStatus("Sign in to add to cart"); return; }
+                      setGroupAddToCartLoading(true);
+                      setGroupStatus("");
+                      try {
+                        const items = groupRecommendation.suggested_items.map((it) => ({ item_id: it.item_id, quantity: it.quantity }));
+                        await addComboToCart(token, groupRecommendation.restaurant_id, items);
+                        const cart = await fetchCart(token);
+                        setCartData(cart);
+                        setSelectedRestaurant({ id: groupRecommendation.restaurant_id, name: groupRecommendation.restaurant_name, slug: groupRecommendation.restaurant_name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "") });
+                        setShowCartPanel(true);
+                        setTab("chat");
+                        setGroupStatus("");
+                      } catch (e) {
+                        setGroupStatus(e?.message || "Failed to add to cart");
+                      } finally {
+                        setGroupAddToCartLoading(false);
+                      }
+                    }}
+                  >
+                    {groupAddToCartLoading ? "Adding…" : "🛒 Add to cart & order"}
+                  </button>
+                )}
+                {groupRecommendation && !token && (
+                  <div className="group-order-hint" style={{ marginTop: 6 }}>Sign in from the Profile tab to add this order to your cart.</div>
+                )}
+                <button type="button" className="group-order-btn secondary" onClick={() => { setGroupSession(null); setGroupRecommendation(null); setGroupSplit(null); }}>Start over</button>
+              </div>
+            )}
+
+            {groupViewSession && !groupSession && (
+              <div className="group-order-section">
+                <div className="group-order-section-title">Group: {groupViewSession.share_code}</div>
+                <div className="group-order-members-title">Members</div>
+                {groupViewSession.members?.length ? (
+                  <ul className="group-order-members-list">
+                    {groupViewSession.members.map((m) => (
+                      <li key={m.id}>{m.name} – {m.preference || "—"} {m.budget_cents != null ? `$${(m.budget_cents / 100).toFixed(0)}` : ""}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="group-order-hint">No members yet.</div>
+                )}
+                <div className="group-order-join-form">
+                  <input type="text" className="group-order-input" placeholder="Your name" value={groupJoinName} onChange={(e) => setGroupJoinName(e.target.value)} />
+                  <input type="text" className="group-order-input" placeholder="Preference (e.g. biryani, veg)" value={groupJoinPref} onChange={(e) => setGroupJoinPref(e.target.value)} />
+                  <input type="text" className="group-order-input" placeholder="Budget $ (e.g. 15)" value={groupJoinBudget} onChange={(e) => setGroupJoinBudget(e.target.value)} />
+                  <input type="text" className="group-order-input" placeholder="Dietary (e.g. vegetarian)" value={groupJoinDiet} onChange={(e) => setGroupJoinDiet(e.target.value)} />
+                  <button
+                    type="button"
+                    className="group-order-btn primary"
+                    disabled={!groupJoinName.trim() || groupJoinLoading}
+                    onClick={async () => {
+                      setGroupJoinLoading(true);
+                      try {
+                        const budget = groupJoinBudget.trim() ? Math.round(parseFloat(groupJoinBudget) * 100) : null;
+                        await joinGroupSession(groupViewSession.share_code, {
+                          name: groupJoinName.trim(),
+                          preference: groupJoinPref.trim() || null,
+                          budget_cents: budget,
+                          dietary_restrictions: groupJoinDiet.trim() || null,
+                        }, token || null);
+                        const updated = await getGroupSession(groupViewSession.share_code);
+                        setGroupViewSession(updated);
+                        setGroupJoinName(""); setGroupJoinPref(""); setGroupJoinBudget(""); setGroupJoinDiet("");
+                      } catch (e) {
+                        setGroupStatus(e?.message || "Join failed");
+                      } finally {
+                        setGroupJoinLoading(false);
+                      }
+                    }}
+                  >
+                    {groupJoinLoading ? "Adding…" : "Join"}
+                  </button>
+                </div>
+                <div className="group-order-hint" style={{ marginTop: 12 }}>
+                  Once everyone has joined, anyone can get the AI recommendation below.
+                </div>
+                <div className="group-order-section-title" style={{ marginTop: 12 }}>Restaurant preference (optional)</div>
+                <div className="group-order-hint">Select one or more restaurants to limit the AI to those only:</div>
+                <div className="group-order-restaurant-checkboxes">
+                  {groupRestaurantOptions.map((r) => (
+                    <label key={r.id} className="group-order-checkbox-label">
+                      <input
+                        type="checkbox"
+                        checked={groupPreferRestaurantIds.includes(r.id)}
+                        onChange={() => setGroupPreferRestaurantIds((prev) => prev.includes(r.id) ? prev.filter((x) => x !== r.id) : [...prev, r.id])}
+                      />
+                      <span>{r.name}</span>
+                    </label>
+                  ))}
+                </div>
+                <input
+                  type="text"
+                  className="group-order-input"
+                  placeholder="Prefer cuisine (e.g. Indian, Italian)"
+                  value={groupPreferCuisine}
+                  onChange={(e) => setGroupPreferCuisine(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="group-order-btn"
+                  onClick={async () => {
+                    setGroupRecLoading(true);
+                    try {
+                      const rec = await getGroupRecommendation(groupViewSession.share_code, {
+                        restaurantIds: groupPreferRestaurantIds.length > 0 ? groupPreferRestaurantIds : undefined,
+                        cuisine: groupPreferCuisine.trim() || undefined,
+                      });
+                      setGroupRecommendation(rec);
+                      if (rec?.total_cents != null && groupViewSession.members?.length) {
+                        const split = await getGroupSplitEqual(groupViewSession.share_code, rec.total_cents, 600, 400);
+                        setGroupSplit(split);
+                      }
+                    } catch (e) {
+                      setGroupStatus(e?.message || "No recommendation found");
+                    } finally {
+                      setGroupRecLoading(false);
+                    }
+                  }}
+                  disabled={!groupViewSession.members?.length || groupRecLoading}
+                >
+                  {groupRecLoading ? "Finding…" : "Get AI Recommendation"}
+                </button>
+                {groupRecommendation && (
+                  <>
+                    <div className="group-order-recommendation">
+                      <div className="group-order-rec-title">Best: {groupRecommendation.restaurant_name}</div>
+                      <ul className="group-order-rec-items">
+                        {groupRecommendation.suggested_items?.map((it, i) => (
+                          <li key={i}>{it.quantity}x {it.name} – ${(it.price_cents * it.quantity / 100).toFixed(2)}</li>
+                        ))}
+                      </ul>
+                      <div className="group-order-rec-total">Total: ${(groupRecommendation.total_cents / 100).toFixed(2)} · ~${(groupRecommendation.estimated_per_person_cents / 100).toFixed(2)}/person</div>
+                      {groupRecommendation.reasons?.length > 0 && (
+                        <div className="group-order-rec-reasons">{groupRecommendation.reasons.join(" · ")}</div>
+                      )}
+                      {groupRecommendation.group_discount_message && (
+                        <div className="group-order-rec-discount">{groupRecommendation.group_discount_message}</div>
+                      )}
+                    </div>
+                    {groupSplit && (
+                      <div className="group-order-split">
+                        <div className="group-order-split-title">Bill split (equal)</div>
+                        {groupSplit.members?.map((m, i) => (
+                          <div key={i} className="group-order-split-row">{m.member_name}: ${(m.amount_cents / 100).toFixed(2)}</div>
+                        ))}
+                      </div>
+                    )}
+                    {groupRecommendation && (
+                      <button
+                        type="button"
+                        className="group-order-btn primary"
+                        style={{ marginTop: 12 }}
+                        disabled={groupAddToCartLoading || !token}
+                        onClick={async () => {
+                          if (!token) { setTab("profile"); setGroupStatus("Sign in to add to cart"); return; }
+                          setGroupAddToCartLoading(true);
+                          setGroupStatus("");
+                          try {
+                            const items = groupRecommendation.suggested_items.map((it) => ({ item_id: it.item_id, quantity: it.quantity }));
+                            await addComboToCart(token, groupRecommendation.restaurant_id, items);
+                            const cart = await fetchCart(token);
+                            setCartData(cart);
+                            setSelectedRestaurant({ id: groupRecommendation.restaurant_id, name: groupRecommendation.restaurant_name, slug: groupRecommendation.restaurant_name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "") });
+                            setShowCartPanel(true);
+                            setTab("chat");
+                            setGroupStatus("");
+                          } catch (e) {
+                            setGroupStatus(e?.message || "Failed to add to cart");
+                          } finally {
+                            setGroupAddToCartLoading(false);
+                          }
+                        }}
+                      >
+                        {groupAddToCartLoading ? "Adding…" : "🛒 Add to cart & order"}
+                      </button>
+                    )}
+                    {groupRecommendation && !token && (
+                      <div className="group-order-hint" style={{ marginTop: 6 }}>Sign in from the Profile tab to add this order to your cart.</div>
+                    )}
+                  </>
+                )}
+                <button type="button" className="group-order-btn secondary" onClick={() => { setGroupViewSession(null); setGroupJoinCodeInput(""); setGroupRecommendation(null); setGroupSplit(null); setGroupStatus(""); }}>Back</button>
+              </div>
+            )}
+
+            {groupStatus && <div className="group-order-status">{groupStatus}</div>}
+          </motion.div>
+        )}
+
         {/* ====== PROFILE TAB ====== */}
         {tab === "profile" && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
@@ -2295,6 +2687,10 @@ export default function App() {
         <button className={`nav-item ${tab === "taste" ? "active" : ""}`} onClick={() => setTab("taste")}>
           <span className="nav-icon">🧠</span>
           <span>Taste</span>
+        </button>
+        <button className={`nav-item ${tab === "group" ? "active" : ""}`} onClick={() => setTab("group")}>
+          <span className="nav-icon">👥</span>
+          <span>Group</span>
         </button>
         <button className={`nav-item ${tab === "profile" ? "active" : ""}`} onClick={() => setTab("profile")}>
           <span className="nav-icon">👤</span>

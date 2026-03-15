@@ -410,3 +410,69 @@ export async function mealOptimizer({ people, budgetCents, cuisine, restaurantId
     body: JSON.stringify(body),
   });
 }
+
+// --- Group Ordering ---
+
+/** Create a group order session. Auth optional. Returns { id, share_code, members, ... }. */
+export async function createGroupSession(tokenOrNull, payload = {}) {
+  const opts = {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  };
+  if (tokenOrNull) opts.headers.Authorization = `Bearer ${tokenOrNull}`;
+  return request("/group/session", opts);
+}
+
+/** Get group session by id or share code. No auth. */
+export async function getGroupSession(groupIdOrCode) {
+  return request(`/group/${encodeURIComponent(groupIdOrCode)}`);
+}
+
+/** Join a group: add member (name, preference, budget_cents, dietary_restrictions). Auth optional. */
+export async function joinGroupSession(groupIdOrCode, payload, tokenOrNull = null) {
+  const opts = {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  };
+  if (tokenOrNull) opts.headers.Authorization = `Bearer ${tokenOrNull}`;
+  return request(`/group/${encodeURIComponent(groupIdOrCode)}/join`, opts);
+}
+
+/** Get AI recommendation for the group (restaurant + suggested dishes). Optional: restaurantIds (array), cuisine to narrow results. */
+export async function getGroupRecommendation(groupIdOrCode, { lat, lng, restaurantIds, cuisine } = {}) {
+  const params = new URLSearchParams();
+  if (lat != null) params.set("lat", lat);
+  if (lng != null) params.set("lng", lng);
+  if (restaurantIds && restaurantIds.length > 0) params.set("restaurant_ids", restaurantIds.join(","));
+  if (cuisine && String(cuisine).trim()) params.set("cuisine", String(cuisine).trim());
+  const qs = params.toString() ? `?${params.toString()}` : "";
+  return request(`/group/${encodeURIComponent(groupIdOrCode)}/recommendation${qs}`);
+}
+
+/** Get equal bill split. */
+export async function getGroupSplitEqual(groupIdOrCode, totalCents, deliveryCents = 0, taxCents = 0) {
+  const params = new URLSearchParams({
+    total_cents: String(totalCents),
+    delivery_cents: String(deliveryCents),
+    tax_cents: String(taxCents),
+    mode: "equal",
+  });
+  return request(`/group/${encodeURIComponent(groupIdOrCode)}/split?${params.toString()}`);
+}
+
+/** Get item-based bill split. */
+export async function postGroupSplitItemBased(groupIdOrCode, { totalCents, deliveryCents = 0, taxCents = 0, memberItemCents }) {
+  return request(`/group/${encodeURIComponent(groupIdOrCode)}/split`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      total_cents: totalCents,
+      delivery_cents: deliveryCents,
+      tax_cents: taxCents,
+      mode: "item",
+      member_item_cents: memberItemCents,
+    }),
+  });
+}

@@ -78,11 +78,35 @@ class ChatRequest(BaseModel):
     context: str = ""
 
 
+def _is_group_order_intent(message: str) -> bool:
+    """Detect if user is asking for group ordering (voice or text)."""
+    import re
+    lower = message.strip().lower()
+    phrases = (
+        "group order", "group ordering", "start a group order", "order as a group",
+        "order for a group", "order together", "group food", "group lunch", "group dinner",
+        "office lunch", "company lunch", "order for the team", "order for the office",
+    )
+    if any(p in lower for p in phrases):
+        return True
+    if re.search(r"(?:find|get|order|want|need)\s+(?:food|meals?|lunch|dinner)\s+for\s+\d+\s+people", lower):
+        return True
+    return False
+
+
 @router.post("/chat")
 async def voice_chat(req: ChatRequest):
     """Get intelligent response from Sarvam AI agent."""
     if not req.message.strip():
         raise HTTPException(400, "Message cannot be empty")
+
+    # Group order intent: return fixed reply and signal frontend to open Group tab (no LLM call)
+    if _is_group_order_intent(req.message):
+        reply = (
+            "I've opened the Group Order tab for you. Start a group order, share the link with friends, "
+            "add their preferences, and get AI recommendations for the whole group!"
+        )
+        return {"reply": reply, "open_group_tab": True}
 
     system_prompt = (
         "You are a friendly restaurant ordering assistant. "
@@ -201,5 +225,6 @@ async def voice_converse(
         "categories": result.get("categories"),
         "items": result.get("items"),
         "cart_summary": result.get("cart_summary"),
+        "open_group_tab": result.get("open_group_tab"),
     }
 

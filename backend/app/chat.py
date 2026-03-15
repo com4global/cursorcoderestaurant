@@ -605,6 +605,24 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
     cleaned = text.strip()
     lower = cleaned.lower()
 
+    # --- Group order intent (voice or text): open Group tab ---
+    _group_phrases = (
+        "group order", "group ordering", "start a group order", "order as a group",
+        "order for a group", "order together", "group food", "group lunch", "group dinner",
+        "office lunch", "company lunch", "order for the team", "order for the office",
+    )
+    _group_pattern = re.compile(
+        r"(?:find|get|order|want|need)\s+(?:food|meals?|lunch|dinner)\s+for\s+(\d+)\s+people",
+        re.I,
+    )
+    if any(p in lower for p in _group_phrases) or _group_pattern.search(lower):
+        out = _result(
+            "Open the **Group Order** tab to start a group order. Share the link with friends, add their preferences, and get AI recommendations for the whole group!",
+            voice_prompt="I've opened the Group Order tab. Start a group order and share the link with your friends.",
+        )
+        out["open_group_tab"] = True
+        return out
+
     # --- Reset / Exit (also clear cart so user truly starts fresh) ---
     if lower in ("#reset", "#exit", "reset", "exit", "start over"):
         crud.clear_user_pending_orders(db, session.user_id)
