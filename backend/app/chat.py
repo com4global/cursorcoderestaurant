@@ -328,10 +328,46 @@ def _token_match_score(query: str, item_name: str) -> float:
     return matched_tokens / len(query_tokens)
 
 
+def _extract_item_phrase(text: str) -> str:
+    """Strip order fillers and leading a/an to get the item name phrase for matching."""
+    t = text.lower().strip()
+    for filler in ["i want", "i'd like", "i would like", "give me", "get me",
+                   "can i have", "can i get", "please", "order", "add", "i need", "i'll have", "i will have"]:
+        t = re.sub(re.escape(filler), "", t, flags=re.IGNORECASE)
+    t = t.strip().strip(",").strip()
+    # Strip leading "a " / "an "
+    for prefix in ("a ", "an "):
+        if t.startswith(prefix):
+            t = t[len(prefix):].strip()
+            break
+    return t
+
+
+def _extract_quantity_from_message(text: str) -> int:
+    """Extract quantity from phrases like 'one iced coffee', 'two samosas', '3 biryani'."""
+    word_to_num = {
+        "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4,
+        "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    }
+    lower = text.lower().strip()
+    # Leading digit: "3 iced coffee" or "2x samosa"
+    m = re.match(r'^(\d+)\s*(?:x\s*)?', lower)
+    if m:
+        return min(int(m.group(1)), 99)
+    words = lower.split()
+    if words and words[0] in word_to_num:
+        return min(word_to_num[words[0]], 99)
+    # "I would like one iced coffee" -> look for "one" anywhere
+    for w in words:
+        if w in word_to_num:
+            return min(word_to_num[w], 99)
+    return 1
+
+
 def _llm_match_item(user_input: str, items: list[MenuItem]) -> MenuItem | None:
     """
-    Use Sarvam AI LLM to intelligently match voice input against menu items.
-    Much more accurate than fuzzy string matching for voice transcriptions.
+    Use LLM to match customer message to a menu item. Pass full user message and all
+    menu items so the model can resolve e.g. "one iced coffee" -> Iced Coffee (not the category).
     """
     if not items or not user_input.strip():
         return None
@@ -339,33 +375,31 @@ def _llm_match_item(user_input: str, items: list[MenuItem]) -> MenuItem | None:
     try:
         from . import sarvam_service
 
-        # Build a numbered list of item names for the LLM
         item_names = [f"{i+1}. {item.name}" for i, item in enumerate(items)]
         item_list_str = "\n".join(item_names)
 
         system_prompt = (
-            "You are a menu item matcher for a restaurant ordering system. "
-            "The user is ordering food via voice. Match their spoken input to the closest menu item. "
-            "Reply with ONLY the number of the matched item. If no item matches, reply with 0. "
-            "Be smart about voice transcription errors (e.g., 'chaat' = 'chat', 'briyani' = 'biryani'). "
-            "Do not explain, just reply with the number."
+            "You are a menu item matcher for a restaurant. The user is viewing a list of menu items "
+            "and said something. Match their message to ONE menu item from the list. "
+            "Examples: 'I would like one iced coffee' -> match to 'Iced Coffee' (the drink), NOT a category. "
+            "'Give me two samosas' -> match to the item that is samosa. "
+            "Reply with ONLY the number of the matched item (1 to N). If they are NOT ordering an item "
+            "(e.g. asking to change category or unclear), reply with 0. Do not explain."
         )
 
-        context = f"Available menu items:\n{item_list_str}"
+        context = f"Menu items in current category:\n{item_list_str}"
         user_msg = f"Customer said: \"{user_input}\""
 
         result = sarvam_service.chat_completion(user_msg, system_prompt, context)
         result = result.strip()
 
-        # Extract number from response
         import re as _re
         num_match = _re.search(r'\d+', result)
         if num_match:
-            idx = int(num_match.group()) - 1  # Convert 1-indexed to 0-indexed
+            idx = int(num_match.group()) - 1
             if 0 <= idx < len(items):
                 return items[idx]
-    except Exception as e:
-        # LLM failed — fall back to fuzzy matching
+    except Exception:
         import traceback
         traceback.print_exc()
 
@@ -455,7 +489,7 @@ def _find_best_item(query: str, all_items: list[MenuItem]) -> MenuItem | None:
     scored = []
     for item in all_items:
         score = _compute_item_score(query_lower, item)
-        if score >= 0.65:  # Raised from 0.55 for better accuracy
+        if score >= 0.55:  # Voice-friendly: "ice coffee", "iced cofee" still match "Iced Coffee"
             scored.append((item, score))
 
     scored.sort(key=lambda x: x[1], reverse=True)
@@ -467,7 +501,7 @@ def _find_best_item(query: str, all_items: list[MenuItem]) -> MenuItem | None:
     if scored[0][1] >= 0.75:
         return scored[0][0]
 
-    # If borderline (0.65-0.75), only return if it's clearly the best
+    # If borderline (0.55-0.75), only return if it's clearly the best (voice typos: "ice coffee", "iced cofee")
     if len(scored) == 1:
         return scored[0][0]
 
@@ -701,7 +735,7 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                     return _result(
                         reply, restaurant_id=restaurant.id, order_id=order.id,
                         categories=cats, cart_summary=cart,
-                        voice_prompt=f"Added {added_names}. Your total is {total}. Would you like anything else, or say done to finish?",
+                        voice_prompt=f"Added {added_names}. Want anything else, or say done to finish?",
                     )
 
                 # Try matching as category
@@ -839,7 +873,7 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                 restaurant_id=session.restaurant_id,
                 order_id=order.id,
                 cart_summary=cart,
-                voice_prompt=f"Added {menu_item.name}. Total is {total}. Want anything else, or say done?",
+                voice_prompt=f"Added {menu_item.name}. Want anything else, or say done?",
             )
         return _result(
             "Item not found.",
@@ -847,60 +881,123 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             voice_prompt="I couldn't find that item. What would you like to add?",
         )
 
-    # --- Smart matching: try items FIRST, then categories ---
-    # Uses Sarvam AI LLM as fallback when fuzzy matching isn't confident
-    print(f"[MATCH DEBUG] raw='{text}' cleaned='{cleaned}' lower='{lower}' session.category_id={session.category_id} session.restaurant_id={session.restaurant_id}")
+    # --- Change restaurant / go back (when user wants to switch restaurant) ---
+    if session.restaurant_id:
+        change_restaurant_phrases = (
+            "change restaurant", "different restaurant", "go back", "switch restaurant",
+            "other restaurant", "another restaurant", "new restaurant", "back to restaurants",
+            "show restaurants", "list restaurants", "which restaurants",
+            "change the restaurant", "switch the restaurant", "chain restaurant",
+        )
+        # Exact, startswith, contains, or voice-friendly: "change"/"switch"/"different" + "restaurant"
+        has_change_restaurant = "change" in lower and "restaurant" in lower
+        has_switch_restaurant = "switch" in lower and "restaurant" in lower
+        # Tamil: "சேஞ்ச்"/"சேன்ஜ்" = change, "ரெஸ்டாரண்ட்" = restaurant; "சேஞ்ச் த" = "change the" (partial)
+        tamil_change = any(
+            s in cleaned for s in ("சேஞ்ச்", "சேன்ஜ்", "மாற்ற")
+        ) or ("ரெஸ்டாரண்ட்" in cleaned and ("சேஞ்ச்" in cleaned or "சேன்ஜ்" in cleaned or "மாற்ற" in cleaned))
+        wants_change = (
+            lower.strip() in change_restaurant_phrases
+            or any(lower.startswith(p) for p in change_restaurant_phrases)
+            or any(p in lower for p in (
+                "different restaurant", "change restaurant", "another restaurant",
+                "other restaurant", "switch restaurant", "back to restaurants",
+                "show restaurants", "list restaurants", "new restaurant",
+                "want to change restaurant", "like to change restaurant",
+                "pick another restaurant", "choose another restaurant",
+                "go back to restaurants", "see other restaurants",
+            ))
+            or has_change_restaurant
+            or has_switch_restaurant
+            or (("different" in lower or "another" in lower or "other" in lower) and "restaurant" in lower)
+            or tamil_change
+        )
+        if wants_change:
+            _set_session_state(db, session, restaurant_id=None, category_id=None, order_id=None)
+            all_restaurants = crud.list_restaurants(db)
+            rest_names = ", ".join(r.name for r in all_restaurants[:6])
+            suggestions = [f"• {r.name} — #{r.slug}" for r in all_restaurants[:6]]
+            return _result(
+                "Which restaurant would you like?\n\n" + "\n".join(suggestions),
+                restaurant_id=None,
+                voice_prompt=f"Which restaurant would you like? We have: {rest_names}.",
+            )
+
+    # --- General search while in a restaurant: "cheap biryani nearby" / "restaurants with X" ---
+    if session.restaurant_id and len(cleaned) > 3:
+        discovery_hints = ("nearby", "near me", "cheap", "cheapest", "restaurants that", "restaurants with",
+                          "where can i get", "where can i find", "who has", "which restaurant has")
+        if any(h in lower for h in discovery_hints):
+            all_restaurants = crud.list_restaurants(db)
+            cross_results = _search_items_across_restaurants(db, cleaned, all_restaurants)
+            if cross_results:
+                _set_session_state(db, session, restaurant_id=None, category_id=None, order_id=None)
+                display_kws = " ".join(w for w in lower.split() if w not in _CHAT_STOP_WORDS and len(w) >= 2)
+                lines = [f'Found "{display_kws}" at these restaurants:\n']
+                seen = set()
+                rest_names = []
+                for item, rest, score in cross_results:
+                    if rest.id not in seen:
+                        lines.append(f"• **{rest.name}** — {item.name} (${item.price_cents/100:.2f})")
+                        rest_names.append(rest.name)
+                        seen.add(rest.id)
+                lines.append(f'\nSay the restaurant name or type #{cross_results[0][1].slug} to order!')
+                return _result(
+                    "\n".join(lines),
+                    restaurant_id=None,
+                    voice_prompt=f"I found that at: {', '.join(rest_names[:3])}. Which restaurant would you like?",
+                )
+
+    # --- When items are already displayed (user is in a category): try ITEM first (add to cart), then category (switch) ---
     all_items = _get_all_restaurant_items(db, session.restaurant_id)
-    input_words = lower.split()
-
-    # PRIORITY CHECK: If input exactly matches a category name, skip item matching
-    # This prevents "chat" from matching "Samosa Chaat" as an item
-    # while still allowing "samosa chat" (multi-word) to match items first
     categories = crud.list_categories(db, session.restaurant_id)
-    exact_cat_match = None
-    for cat in categories:
-        if cat.name.lower() == lower:
-            exact_cat_match = cat
-            break
+    category_items = [i for i in all_items if session.category_id and i.category_id == session.category_id]
 
-    # Only do item matching if input does NOT exactly match a category name
+    # When user is viewing a category's items: try FAST path first (fuzzy/token), LLM only as fallback
+    # so e.g. "iced coffee" -> instant match; "I would like one iced coffee" -> parse_order_items or LLM
     item_parsed = []
-    if not exact_cat_match:
-        # Step 0: If user is already in a category, try matching within THAT category first
-        # This prevents "samosa chat" from re-matching category "Chat" when user is already viewing Chat items
-        category_items = []
-        if session.category_id:
-            category_items = [i for i in all_items if i.category_id == session.category_id]
-
-        # Step 1a: Try fuzzy item matching within current category first
-        if category_items:
-            item_parsed = _parse_order_items(cleaned, category_items)
-            if not item_parsed:
-                single = _find_best_item(cleaned, category_items)
-                if single:
-                    item_parsed = [(single, 1)]
-            # Step 1b: Try LLM matching within current category
-            if not item_parsed:
-                llm_item = _llm_match_item(cleaned, category_items)
-                if llm_item:
-                    item_parsed = [(llm_item, 1)]
-
-        # Step 2: If not found in current category, try ALL restaurant items
+    if session.category_id and category_items:
+        # Direct name match first for ANY order phrase ("I want iced coffee", "give me a cappuccino", etc.)
+        phrase = _extract_item_phrase(cleaned)
+        if phrase:
+            for item in category_items:
+                iname = item.name.lower()
+                # Full match, or item name in phrase, or phrase in item name (handles voice/typos)
+                if phrase == iname or iname in phrase or phrase in iname:
+                    item_parsed = [(item, max(1, _extract_quantity_from_message(cleaned)))]
+                    break
+            # If no exact/substring match, try longest item name contained in phrase (e.g. "large iced coffee" -> "Iced Coffee")
+            if not item_parsed and len(phrase) > 3:
+                best_item, best_len = None, 0
+                for item in category_items:
+                    iname = item.name.lower()
+                    if iname in phrase and len(iname) > best_len:
+                        best_item, best_len = item, len(iname)
+                if best_item:
+                    item_parsed = [(best_item, max(1, _extract_quantity_from_message(cleaned)))]
         if not item_parsed:
-            item_parsed = _parse_order_items(cleaned, all_items)
-            if not item_parsed:
-                single = _find_best_item(cleaned, all_items)
-                if single:
-                    item_parsed = [(single, 1)]
-
-        # Step 3: LLM fallback on all items
+            item_parsed = _parse_order_items(cleaned, category_items)
+        if not item_parsed:
+            single = _find_best_item(cleaned, category_items)
+            if single:
+                item_parsed = [(single, max(1, _extract_quantity_from_message(cleaned)))]
+        if not item_parsed:
+            llm_item = _llm_match_item(cleaned, category_items)
+            if llm_item:
+                qty = _extract_quantity_from_message(cleaned)
+                item_parsed = [(llm_item, max(1, qty))]
+    if not item_parsed:
+        item_parsed = _parse_order_items(cleaned, all_items)
+        if not item_parsed:
+            single = _find_best_item(cleaned, all_items)
+            if single:
+                item_parsed = [(single, 1)]
         if not item_parsed:
             llm_item = _llm_match_item(cleaned, all_items)
             if llm_item:
                 item_parsed = [(llm_item, 1)]
 
     if item_parsed:
-        # Found an item match — add to cart
         order = crud.get_user_order_for_restaurant(db, session.user_id, session.restaurant_id)
         if not order:
             order = crud.create_order(db, session.user_id, session.restaurant_id)
@@ -922,85 +1019,82 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             restaurant_id=session.restaurant_id,
             order_id=order.id,
             cart_summary=cart,
-            voice_prompt=f"Added {voice_added}. Your total is {total}. Would you like anything else, or say done to finish?",
+            categories=_categories_data(db, session.restaurant_id),
+            items=_items_data(db, session.category_id) if session.category_id else None,
+            voice_prompt=f"Added {voice_added}. Want anything else, or say done to finish?",
         )
 
-    # --- Category matching (only if item didn't match) ---
-    categories = crud.list_categories(db, session.restaurant_id)
+    # --- No item match: try CATEGORY match (so user can say "starters" to switch category) ---
     cat_match = None
+    category_query = lower
+    for prefix in (
+        "show me ", "show ", "open ", "open the ", "browse ", "display ", "see ",
+        "i want to see ", "i want ", "can i see ", "let me see ", "give me the ",
+    ):
+        if category_query.startswith(prefix):
+            category_query = category_query[len(prefix):].strip()
+            break
+    category_query = category_query.strip()
+    input_words = category_query.split() if category_query else lower.split()
+    q = category_query or lower
 
-    # Pass 1: Exact match only (input matches category name exactly)
     for cat in categories:
-        if cat.name.lower() == lower or str(cat.id) == lower:
+        if cat.name.lower() == lower or str(cat.id) == lower or (category_query and cat.name.lower() == category_query):
             cat_match = cat
             break
-
-    # Pass 2: Single-word partial match ONLY
-    # For multi-word inputs like "samosa chat", DO NOT match category "Chat"
-    # because the user is clearly asking for a menu item, not a category
     if not cat_match and len(input_words) == 1:
         for cat in categories:
             cat_lower = cat.name.lower()
             cat_words = [w.strip() for w in cat_lower.replace("/", " ").split()]
             iw = input_words[0]
             for cw in cat_words:
-                if len(iw) >= 3 and (iw in cw or cw in iw):
+                if len(iw) >= 2 and (iw in cw or cw in iw):
                     cat_match = cat
                     break
-                if len(iw) >= 3 and _similarity(iw, cw) >= 0.75:
+                if len(iw) >= 2 and _similarity(iw, cw) >= 0.7:
                     cat_match = cat
                     break
             if cat_match:
                 break
-
-    # Pass 3: Fuzzy match on full name
-    # For multi-word inputs, only compare full input vs full category name
-    # (prevents "samosa chat" from matching category "Chat" via per-word similarity)
     if not cat_match:
         best_cat, best_score = None, 0.0
         for cat in categories:
             cat_lower = cat.name.lower()
-            score = _similarity(lower, cat_lower)
-            # Only do per-word matching for SINGLE-word inputs
+            score = max(_similarity(q, cat_lower), _similarity(lower, cat_lower))
             if len(input_words) == 1:
                 for word in cat_lower.replace("/", " ").split():
                     word = word.strip()
                     if word:
-                        score = max(score, _similarity(lower, word))
+                        score = max(score, _similarity(q, word), _similarity(input_words[0], word))
             if score > best_score:
                 best_score = score
                 best_cat = cat
-        if best_score >= 0.55:
+        # Only treat as category if input isn't more specific than category name (e.g. "iced coffee" vs "Coffee" = item)
+        cat_words = len(best_cat.name.split()) if best_cat else 0
+        if best_score >= 0.55 and len(input_words) <= cat_words:
             cat_match = best_cat
+    # When already in a category, don't use LLM for multi-word input — likely an item name ("iced coffee")
+    if not cat_match and not (session.category_id and len(cleaned.split()) >= 2):
+        cat_match = _llm_match_category(cleaned, categories)
+
+    # Do not re-select the same category (e.g. "iced coffee" matched category "Coffee")
+    if cat_match and session.category_id and cat_match.id == session.category_id:
+        cat_match = None
 
     if cat_match:
         _set_session_state(db, session, category_id=cat_match.id)
         items = _items_data(db, cat_match.id)
-        item_list = _build_voice_item_list(items)
         return _result(
-            f"{cat_match.name} — {len(items)} items. Tap + to add or just tell me what you want!",
+            f"{cat_match.name} — {len(items)} items. Tap + to add or tell me the item name.",
             restaurant_id=session.restaurant_id,
             category_id=cat_match.id,
             order_id=session.order_id,
+            categories=_categories_data(db, session.restaurant_id),
             items=items,
-            voice_prompt=f"{cat_match.name}. Which one would you like?",
+            voice_prompt=f"{cat_match.name}. {len(items)} items. Which one would you like?",
         )
 
-    # Fuzzy category match failed — try LLM category matching
-    if not cat_match:
-        llm_cat = _llm_match_category(cleaned, categories)
-        if llm_cat:
-            _set_session_state(db, session, category_id=llm_cat.id)
-            items = _items_data(db, llm_cat.id)
-            item_list = _build_voice_item_list(items)
-            return _result(
-                f"{llm_cat.name} — {len(items)} items. Tap + to add or just tell me what you want!",
-                restaurant_id=session.restaurant_id,
-                category_id=llm_cat.id,
-                order_id=session.order_id,
-                items=items,
-                voice_prompt=f"{llm_cat.name}. Which one would you like?",
-            )
+    # --- No item and no category match: fall through to "didn't catch" / show menu ---
 
     # --- Show menu / categories ---
     if lower in ("menu", "show menu", "categories", "show categories", "what do you have"):
@@ -1122,15 +1216,14 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                 voice_prompt=f"Did you mean: {match_names}? Please say the exact item name.",
             )
 
-        # Show categories as fallback
+        # Show categories as fallback (no full list in TTS — keep it short)
         cats = _categories_data(db, session.restaurant_id)
-        cat_list = _build_voice_category_list(cats)
         return _result(
             "I didn't catch that. Pick a category or type what you want!",
             restaurant_id=session.restaurant_id,
             order_id=session.order_id,
             categories=cats,
-            voice_prompt=f"I didn't catch that. Our categories are: {cat_list}. Which one would you like?",
+            voice_prompt="I didn't catch that. Pick a category or say the item name.",
         )
 
     # Create or get order (per-restaurant)
@@ -1159,5 +1252,5 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
         restaurant_id=session.restaurant_id,
         order_id=order.id,
         cart_summary=cart,
-        voice_prompt=f"Added {voice_added}. Your total is {total}. Would you like anything else, or say done to finish?",
+        voice_prompt=f"Added {voice_added}. Want anything else, or say done to finish?",
     )

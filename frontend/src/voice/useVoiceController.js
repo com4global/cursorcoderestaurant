@@ -16,6 +16,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { SpeechRecognizer } from './SpeechRecognizer.js';
 import { TTSPlayer } from './TTSPlayer.js';
 import { parseIntent } from './IntentParser.js';
+import { trace, traceError } from './trace.js';
 
 // Voice states
 const STATES = { IDLE: 'idle', LISTENING: 'listening', PROCESSING: 'processing', SPEAKING: 'speaking' };
@@ -48,9 +49,10 @@ function streamTextToCallback(text, callback, intervalMs = 25) {
  * @param {function} config.onSendMessage - (text, fromVoice) => void — send message to chat
  * @param {function} config.onAddBotMessage - (text) => void — add bot message to chat
  * @param {function} config.doSendRef - ref to doSend function
+ * @param {string} config.language - 'en' | 'ta' for English or Tamil (STT + TTS)
  * @returns Voice state and control functions
  */
-export function useVoiceController({ apiBase, doSendRef }) {
+export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
     const [voiceMode, setVoiceMode] = useState(false);
     const [voiceState, setVoiceState] = useState(STATES.IDLE);
     const [liveTranscript, setLiveTranscript] = useState('');
@@ -59,16 +61,20 @@ export function useVoiceController({ apiBase, doSendRef }) {
 
     const voiceModeRef = useRef(false);
     const voiceStateRef = useRef(STATES.IDLE);
+    const languageRef = useRef(language);
     const recognizerRef = useRef(null);
     const ttsPlayerRef = useRef(null);
     const streamCancelRef = useRef(null);
 
+    useEffect(() => { languageRef.current = language; }, [language]);
     // Keep refs in sync
     useEffect(() => { voiceStateRef.current = voiceState; }, [voiceState]);
 
+    const ttsLang = language === 'ta' ? 'ta-IN' : 'en-IN';
+
     // Initialize components
     useEffect(() => {
-        recognizerRef.current = new SpeechRecognizer();
+        recognizerRef.current = new SpeechRecognizer({ lang: ttsLang });
         ttsPlayerRef.current = new TTSPlayer(apiBase);
 
         return () => {
@@ -76,6 +82,10 @@ export function useVoiceController({ apiBase, doSendRef }) {
             ttsPlayerRef.current?.destroy();
         };
     }, [apiBase]);
+
+    useEffect(() => {
+        if (recognizerRef.current) recognizerRef.current.setLang(language === 'ta' ? 'ta-IN' : 'en-IN');
+    }, [language]);
 
     // ---- Barge-in: stop TTS when user speaks ----
     const bargeIn = useCallback(() => {
@@ -95,6 +105,7 @@ export function useVoiceController({ apiBase, doSendRef }) {
         if (!text.trim() || !voiceModeRef.current) return;
 
         const confStr = confidence > 0 ? (confidence * 100).toFixed(0) + '%' : 'N/A';
+        trace('voice.finalTranscript', { text, confidence: confStr });
         console.log(`%c[Voice] 🎤 Final transcript: "${text}" (confidence: ${confStr})`, 'color: #00ff88; font-weight: bold; font-size: 13px');
 
         setVoiceState(STATES.PROCESSING);
@@ -107,11 +118,14 @@ export function useVoiceController({ apiBase, doSendRef }) {
             console.log(`%c[Voice] 📤 Sending to doSend("${text}", fromVoice=true, confidence=${confStr})`, 'color: #00bbff');
             try {
                 await doSendRef.current(text, true, confidence);
+                trace('voice.doSendComplete', { text: text.substring(0, 60) });
                 console.log('%c[Voice] ✅ doSend completed', 'color: #00ff88');
             } catch (err) {
+                traceError('voice.doSendError', err, { text: text.substring(0, 60) });
                 console.error('%c[Voice] ❌ doSend error:', 'color: #ff4444; font-weight: bold', err);
             }
         } else {
+            trace('voice.doSendRefNull', {});
             console.warn('%c[Voice] ⚠️ doSendRef.current is null — doSend not connected!', 'color: #ffaa00; font-weight: bold');
         }
     }, [doSendRef]);
@@ -121,6 +135,8 @@ export function useVoiceController({ apiBase, doSendRef }) {
         if (!voiceModeRef.current) return;
         const recognizer = recognizerRef.current;
         if (!recognizer) return;
+
+        recognizer.setLang(languageRef.current === 'ta' ? 'ta-IN' : 'en-IN');
 
         recognizer.onLiveTranscript = (text) => {
             setLiveTranscript(text);
@@ -176,8 +192,8 @@ export function useVoiceController({ apiBase, doSendRef }) {
             else if (state === 'idle' && voiceModeRef.current) setVoiceState(STATES.LISTENING);
         };
 
-        // TTSPlayer.speak handles text cleaning, sentence chunking, and streaming playback
-        player.speak(text).catch((err) => {
+        const lang = languageRef.current === 'ta' ? 'ta-IN' : 'en-IN';
+        player.speak(text, { lang }).catch((err) => {
             console.error('[TTS] Sarvam TTS error:', err);
             if (voiceModeRef.current) {
                 setVoiceState(STATES.LISTENING);
@@ -224,8 +240,9 @@ export function useVoiceController({ apiBase, doSendRef }) {
             // Start listening immediately (no waiting)
             startListening();
 
-            // Play greeting via streaming TTS (async, non-blocking)
-            const greet = "Hello! What would you like to eat?";
+            const greet = languageRef.current === 'ta'
+                ? "வணக்கம்! நீங்கள் என்ன சாப்பிட விரும்புகிறீர்கள்?"
+                : "Hello! What would you like to eat?";
             speak(greet);
         }
     }, [voiceMode, startListening, speak]);

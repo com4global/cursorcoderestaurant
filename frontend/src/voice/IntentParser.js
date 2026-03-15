@@ -172,7 +172,27 @@ export function parseIntent(text, convState = {}, restaurants = []) {
         return result;
     }
 
-    // ─── 6. Change restaurant ────────────────────────────────────
+    // ─── 5b. Change restaurant (no target) — "change restaurant", "switch restaurant", "different restaurant", etc.
+    // Backend will show restaurant list; no restaurantMatch so we send raw text to chat
+    const wantDifferentRestaurantPhrases = [
+        /^(?:change|switch)\s+(?:the\s+)?restaurant\s*$/i,
+        /^(?:different|another|other|new)\s+restaurant\s*$/i,
+        /^go\s+back\s*$/i,
+        /^back\s+to\s+restaurants\s*$/i,
+        /^(?:show|list|see)\s+restaurants\s*$/i,
+        /^which\s+restaurants\s*$/i,
+        /(?:want|like)\s+to\s+(?:change|switch)\s+(?:the\s+)?restaurant/i,
+        /(?:pick|choose|select)\s+another\s+restaurant/i,
+        /(?:go\s+back|see\s+other)\s+to\s+restaurants/i,
+    ];
+    if (wantDifferentRestaurantPhrases.some(p => p.test(t))) {
+        result.intent = INTENTS.CHANGE_RESTAURANT;
+        result.restaurantMatch = null; // no specific restaurant — backend will show list
+        result.parseTimeMs = performance.now() - start;
+        return result;
+    }
+
+    // ─── 6. Change restaurant (to specific name) ───────────────────
     if (restaurants.length > 0) {
         const switchRegex = /^(?:change|switch|move|go)\s+(?:to|the\s+restaurant\s+to)\s+/i;
         const fromRegex = /(?:from|at|in)\s+(.+?)(?:\s+restaurant|\s+menu)?\s*$/i;
@@ -362,14 +382,22 @@ function fuzzyMatchRestaurant(name, restaurants) {
     const lower = name.toLowerCase().replace(/restaurant|menu/gi, '').trim();
     if (!lower) return null;
 
-    // Try exact match first
-    let match = restaurants.find(r => r.name.toLowerCase() === lower || (r.slug || '').toLowerCase() === lower);
+    // Only DB-backed restaurants have menu/categories (OSM nearby has no id)
+    const withMenu = restaurants.filter(
+        (r) => r.id != null && r.id !== '' && Number.isFinite(Number(r.id))
+    );
+    const pool = withMenu.length ? withMenu : restaurants;
+
+    let match = pool.find(
+        (r) => r.name.toLowerCase() === lower || (r.slug || '').toLowerCase() === lower
+    );
     if (match) return match;
 
-    // Try substring match
-    match = restaurants.find(r =>
-        r.name.toLowerCase().includes(lower) || lower.includes(r.name.toLowerCase())
-        || (r.slug || '').toLowerCase().includes(lower)
+    match = pool.find(
+        (r) =>
+            r.name.toLowerCase().includes(lower) ||
+            lower.includes(r.name.toLowerCase()) ||
+            (r.slug || '').toLowerCase().includes(lower)
     );
     return match || null;
 }

@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     jwt_secret: str = "change-me"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 24 * 7  # 7 days
-    cors_origins: str = "http://localhost:5173,https://zenzeerestaurantai.netlify.app,tauri://localhost,https://tauri.localhost"
+    cors_origins: str = "http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,http://127.0.0.1:5174,https://zenzeerestaurantai.netlify.app,tauri://localhost,https://tauri.localhost"
     llm_enabled: bool = False
     openai_api_key: str | None = None
 

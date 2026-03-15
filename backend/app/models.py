@@ -37,6 +37,7 @@ class Restaurant(Base):
     notification_email = Column(String(255), nullable=True)
     notification_phone = Column(String(20), nullable=True)
     rating = Column(Float, nullable=True)  # 1.0-5.0 star rating
+    avg_prep_minutes = Column(Integer, default=20, nullable=False)  # average prep time for ETA
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -83,6 +84,8 @@ class Order(Base):
     restaurant_id = Column(Integer, ForeignKey("restaurants.id"), nullable=False)
     status = Column(String(40), default="pending", nullable=False)
     total_cents = Column(Integer, default=0, nullable=False)
+    estimated_ready_at = Column(DateTime, nullable=True)     # ETA for customer
+    status_updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)  # last status change
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     user = relationship("User", back_populates="orders")

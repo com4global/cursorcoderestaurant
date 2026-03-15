@@ -1,10 +1,45 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, verifyPayment, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal } from "./api.js";
+import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, verifyPayment, trackOrder, getRestaurantQueue, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
 import { useVoiceController } from "./voice/useVoiceController.js";
+import { trace, traceError } from "./voice/trace.js";
 
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
+
+/** Normalize name so OSM "Anjappar" matches partnered "Anjappar" / "Anjappar — …" */
+function normRestName(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/**
+ * Nearby (OpenStreetMap) rows have no DB id. Map them to the partnered restaurant
+ * so /restaurants/:id/categories works. Prefer exact name, then substring match.
+ */
+function resolvePartneredRestaurant(r, partneredList) {
+  if (!r || !partneredList?.length) return r;
+  const hasNumericId = r.id != null && r.id !== "" && Number.isFinite(Number(r.id));
+  if (hasNumericId && r.partnered !== false) return r;
+  if (hasNumericId) {
+    const byId = partneredList.find((p) => p.id === Number(r.id));
+    if (byId) return { ...byId, partnered: true };
+  }
+  const n = normRestName(r.name);
+  if (n.length < 2) return r;
+  let hit = partneredList.find((p) => normRestName(p.name) === n);
+  if (hit) return { ...hit, partnered: true };
+  hit = partneredList.find(
+    (p) => {
+      const pn = normRestName(p.name);
+      return pn.includes(n) || n.includes(pn);
+    }
+  );
+  if (hit && n.length >= 3) return { ...hit, partnered: true };
+  return r;
+}
 
 // Smart food emoji mapper
 const FOOD_EMOJI_MAP = [
@@ -129,7 +164,7 @@ const welcomeMsg = {
   content: "Hello! Pick a restaurant from the Home tab, then browse menus and add items here.",
 };
 
-const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+const API = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || "http://localhost:8000");
 
 export default function App() {
   // Active tab
@@ -205,11 +240,11 @@ export default function App() {
   const [myOrders, setMyOrders] = useState([]);
   const [ordersTab, setOrdersTab] = useState("current");
 
-  // Voice Conversation Mode — powered by useVoiceController hook
-  // (manages SpeechRecognizer, IntentParser, TTSPlayer, state machine)
+  // Voice Conversation Mode — powered by useVoiceController hook (English / Tamil)
   const doSendRef = useRef(null);
   const voiceSpeakRef = useRef(null);
-  const voice = useVoiceController({ apiBase: API, doSendRef });
+  const [voiceLanguage, setVoiceLanguage] = useState("en");
+  const voice = useVoiceController({ apiBase: API, doSendRef, language: voiceLanguage });
   const { voiceMode, voiceState, liveTranscript, voiceTranscript, isListening, voiceModeRef, voiceStateRef } = voice;
   const voiceStartListeningRef = useRef(null);
   const lastVoicePromptRef = useRef(null);
@@ -460,6 +495,7 @@ export default function App() {
   const doSend = async (text, fromVoice = false, voiceConfidence = 0) => {
     if (!text.trim()) return;
     const trimmed = text.trim();
+    trace('doSend.entry', { fromVoice, text: trimmed, voiceConfidence, selectedRestaurant: selectedRestaurant?.name ?? null, sessionId });
     setMessages((p) => [...p, { role: "user", content: trimmed }]);
     setMessageText(""); setShowSuggestions(false); setStatus("Thinking...");
 
@@ -474,7 +510,8 @@ export default function App() {
         ...restaurants,
         ...nearbyPlaces.map(r => ({ ...r, slug: r.slug || r.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') })),
       ];
-      const validation = validateVoiceInput(trimmed, voiceConfidence, allRestsForValidation);
+      const validation = validateVoiceInput(trimmed, voiceConfidence, allRestsForValidation, { language: voiceLanguage });
+      trace('voice.validation', { valid: validation.valid, reason: validation.reason, cleaned: validation.text, layers: validation.layers });
 
       // Log all layer decisions
       validation.layers.forEach(l => {
@@ -484,6 +521,7 @@ export default function App() {
 
       if (!validation.valid) {
         const msg = getRejectionMessage(validation.reason);
+        trace('voice.rejected', { reason: validation.reason, message: msg });
         console.log(`%c[Validator] ❌ REJECTED: ${validation.reason} — "${msg}"`, 'color: #ff4444; font-weight: bold');
         setMessages((p) => [...p, { role: "bot", content: msg }]);
         setStatus("Ready.");
@@ -512,6 +550,13 @@ export default function App() {
       if (allRestaurants.length > 0) console.log(`%c[IntentRouter] 🏪 Names: ${allRestaurants.map(r => r.name).join(', ')}`, 'color: #888; font-size: 10px');
 
       const intentResult = parseIntent(cleanedText, convStateRef.current, allRestaurants);
+      trace('intent.parsed', {
+        intent: intentResult.intent,
+        parseTimeMs: intentResult.parseTimeMs,
+        input: cleanedText,
+        restaurantMatch: intentResult.restaurantMatch?.name ?? null,
+        entities: intentResult.entities,
+      });
       console.log(`%c[IntentRouter] 🎯 Intent: ${intentResult.intent} (${intentResult.parseTimeMs.toFixed(1)}ms)`, 'color: #ff6600; font-weight: bold; font-size: 13px');
       console.log(`%c[IntentRouter] 📝 Input: "${cleanedText}" | Entities:`, 'color: #aaa', intentResult.entities, '| StateUpdate:', intentResult.stateUpdate);
       if (intentResult.restaurantMatch) console.log(`%c[IntentRouter] 🏪 Restaurant match: "${intentResult.restaurantMatch.name}"`, 'color: #00ff88; font-weight: bold');
@@ -547,9 +592,24 @@ export default function App() {
         return;
       }
 
-      // ── CHANGE RESTAURANT ──────────────────────────────────────
+      // ── CHANGE RESTAURANT (with specific restaurant name) ───────
+      // When no restaurantMatch ("change restaurant", "different restaurant"), fall through to send to backend
       if (intentResult.intent === INTENTS.CHANGE_RESTAURANT && intentResult.restaurantMatch) {
-        const matchedRest = intentResult.restaurantMatch;
+        const matchedRest = resolvePartneredRestaurant(intentResult.restaurantMatch, restaurants);
+        if (matchedRest.id == null || matchedRest.id === "" || Number.isNaN(Number(matchedRest.id))) {
+          setMessages((p) => [
+            ...p,
+            {
+              role: "bot",
+              content: `Couldn't open **${intentResult.restaurantMatch?.name || "that"}** on the menu. Pick a restaurant from **Order Now** or type **#** and choose one with the ✓ badge.`,
+            },
+          ]);
+          setStatus("Ready.");
+          if (fromVoice && voiceModeRef.current) {
+            voiceSpeakRef.current("Pick a restaurant from Order Now, or type hash and choose one with the checkmark.");
+          }
+          return;
+        }
         // Update conversation state: keep dish/diet/price, change restaurant
         convStateRef.current = applyUpdate(convStateRef.current, intentResult.stateUpdate);
 
@@ -565,6 +625,12 @@ export default function App() {
             voiceSpeakRef.current(`Welcome to ${matchedRest.name}. Pick a category.`);
           }
           const selectRes = await sendMessage(token, buildChatPayload(`#${matchedRest.slug}`, null));
+          // Sync selectedRestaurant with backend (avoids ID mismatch: voice match can be from nearby list)
+          if (selectRes.restaurant_id != null) {
+            const fromList = restaurants.find((r) => r.id === selectRes.restaurant_id)
+              ?? nearbyPlaces.find((r) => r.id === selectRes.restaurant_id);
+            if (fromList) setSelectedRestaurant(fromList);
+          }
           // Update session with the new restaurant's session
           if (selectRes.session_id) {
             setSessionId(selectRes.session_id);
@@ -585,7 +651,32 @@ export default function App() {
             return;
           }
 
-          // Categories empty — try a follow-up to load menu
+          // Categories empty — fetch via REST then fallback to 'show menu'
+          if (selectRes.restaurant_id != null) {
+            try {
+              const apiBase = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || "http://localhost:8000");
+              const catRes = await fetch(`${apiBase}/restaurants/${selectRes.restaurant_id}/categories`);
+              if (catRes.ok) {
+                const cats = await catRes.json();
+                if (cats && cats.length > 0) {
+                  setActiveCategories(cats);
+                  setActiveCategoryName(null);
+                  setCurrentItems([]);
+                  const catNames = cats.map((c) => (typeof c === "string" ? c : c.name)).join(", ");
+                  setMessages((p) => [...p, {
+                    role: "bot",
+                    content: selectRes.reply || `Welcome to **${matchedRest.name}**! Categories: ${catNames}`,
+                    categories: cats,
+                  }]);
+                  setStatus("Ready.");
+                  if (fromVoice && voiceModeRef.current) {
+                    voiceSpeakRef.current(`${matchedRest.name}. We have: ${catNames}. Which one would you like?`);
+                  }
+                  return;
+                }
+              }
+            } catch (_) { /* ignore */ }
+          }
           console.log(`%c[IntentRouter] ⚠️ No categories from #slug — trying process_message('show menu')`, 'color: #ffaa00');
           const menuRes = await sendMessage(token, buildChatPayload('show menu'));
           if (menuRes.session_id) setSessionId(menuRes.session_id);
@@ -617,6 +708,15 @@ export default function App() {
           return;
         } catch (err) {
           console.error(`%c[IntentRouter] ❌ Restaurant select failed:`, 'color: #ff4444', err);
+          setMessages((p) => [...p, {
+            role: "bot",
+            content: `Couldn't load **${matchedRest.name}**. You can try again or pick another restaurant.`,
+          }]);
+          setStatus("Ready.");
+          if (fromVoice && voiceModeRef.current) {
+            voiceSpeakRef.current("Couldn't load that restaurant. Try again or pick another.");
+          }
+          return;
         }
 
         // Fallback: if we have existing food filters, re-search with the new restaurant context
@@ -747,15 +847,19 @@ export default function App() {
       // If restaurant is selected or categories are active, check for category match FIRST
       if (selectedRestaurant || activeCategories.length > 0) {
         // ── Client-side category matching (instant, no backend) ──────
+        // Skip when input is more specific than a category name (e.g. "iced coffee" → item, not category "Coffee")
         if (activeCategories.length > 0) {
           const inputLower = (fromVoice ? cleanedText : trimmed).toLowerCase().replace(/\s+/g, '');
-          const matchedCat = activeCategories.find(cat => {
-            const catLower = cat.name.toLowerCase().replace(/\s+/g, '');
+          const inputWords = (fromVoice ? cleanedText : trimmed).trim().split(/\s+/).length;
+          let matchedCat = activeCategories.find(cat => {
+            const catLower = (typeof cat.name === 'string' ? cat.name : cat).toLowerCase().replace(/\s+/g, '');
+            const catWords = (typeof cat.name === 'string' ? cat.name : cat).trim().split(/\s+/).length;
+            // Input more specific than category (e.g. "iced coffee" vs "Coffee") → let backend match item
+            if (inputWords > catWords || inputLower.length > catLower.length + 3) return false;
             return catLower === inputLower
               || catLower.startsWith(inputLower)
               || inputLower.startsWith(catLower)
-              || catLower.includes(inputLower)
-              || inputLower.includes(catLower);
+              || (catLower.includes(inputLower) && inputLower.length >= catLower.length - 2);
           });
           if (matchedCat) {
             console.log(`%c[CategoryMatch] ✅ "${fromVoice ? cleanedText : trimmed}" → category "${matchedCat.name}" (id: ${matchedCat.id})`, 'color: #00ff88; font-weight: bold');
@@ -838,6 +942,7 @@ export default function App() {
     //      because setSelectedRestaurant is async and hasn't updated yet when doSend runs
     const trimmedForGuard = (fromVoice ? cleanedText : text.trim());
     if (!selectedRestaurant && !trimmedForGuard.startsWith('#') && !trimmedForGuard.startsWith('category:') && !trimmedForGuard.startsWith('add:') && trimmedForGuard !== 'show menu') {
+      trace('guard.noRestaurant', { trimmedForGuard });
       const msg = "Please pick a restaurant first! Go to the Home tab or type # to search.";
       setMessages((p) => [...p, { role: "bot", content: msg }]);
       setStatus("Ready.");
@@ -849,8 +954,22 @@ export default function App() {
 
     try {
       const textToSend = fromVoice ? cleanedText : text.trim();
+      const payload = buildChatPayload(textToSend);
+      trace('backend.send', { textToSend, session_id: payload.session_id });
       console.log(`%c[Backend] 📤 process_message("${textToSend}")`, 'color: #bb88ff; font-weight: bold');
-      const res = await sendMessage(token, buildChatPayload(textToSend));
+      const res = await sendMessage(token, payload);
+      trace('backend.response', {
+        session_id: res.session_id,
+        restaurant_id: res.restaurant_id,
+        category_id: res.category_id,
+        order_id: res.order_id,
+        replyLength: res.reply?.length ?? 0,
+        replySnippet: res.reply?.substring(0, 120) ?? '',
+        voice_promptSnippet: res.voice_prompt?.substring(0, 80) ?? '',
+        categoriesCount: res.categories?.length ?? 0,
+        itemsCount: res.items?.length ?? 0,
+        itemNames: res.items?.map(i => i.name) ?? [],
+      });
       console.log(`%c[Backend] 📥 Reply: "${res.reply?.substring(0, 80)}..." | Categories: ${res.categories?.length || 0} | Items: ${res.items?.length || 0}`, 'color: #bb88ff', { categories: res.categories, items: res.items?.map(i => i.name) });
       setSessionId(res.session_id);
       setMessages((p) => [...p, {
@@ -859,19 +978,20 @@ export default function App() {
         items: res.items || null,
       }]);
       if (res.categories && res.categories.length > 0) {
-        // Only update categories for responses without items (restaurant selection)
-        // Category-click responses include items — don't overwrite the sticky category bar
+        setActiveCategories(res.categories);
         if (!res.items || res.items.length === 0) {
-          setActiveCategories(res.categories);
           setActiveCategoryName(null);
           setCurrentItems([]);
         }
       }
       if (res.items && res.items.length > 0) {
         setCurrentItems(res.items);
-        // For category: commands, don't overwrite activeCategoryName
-        // (handleCategoryClick already set it to the actual category name)
-        if (!textToSend.startsWith('category:')) {
+        if (textToSend.startsWith('category:')) {
+          // handleCategoryClick already set activeCategoryName
+        } else if (res.category_id != null && res.categories?.length > 0) {
+          const selectedCat = res.categories.find(c => c.id === res.category_id);
+          setActiveCategoryName(selectedCat ? selectedCat.name : text.trim());
+        } else {
           setActiveCategoryName(text.trim());
         }
       }
@@ -881,7 +1001,12 @@ export default function App() {
       }
 
       // Update selectedRestaurant from backend response (for voice-driven restaurant switching)
-      if (res.restaurant_id && (!selectedRestaurant || selectedRestaurant.id !== res.restaurant_id)) {
+      if ("restaurant_id" in res && res.restaurant_id == null) {
+        setSelectedRestaurant(null);
+        setActiveCategories([]);
+        setCurrentItems([]);
+        setActiveCategoryName(null);
+      } else if (res.restaurant_id && (!selectedRestaurant || selectedRestaurant.id !== res.restaurant_id)) {
         const matchedRest = restaurants.find(r => r.id === res.restaurant_id);
         if (matchedRest) setSelectedRestaurant(matchedRest);
       }
@@ -905,6 +1030,7 @@ export default function App() {
 
       setStatus("Ready.");
     } catch (err) {
+      traceError('backend.error', err, { fromVoice, text: trimmed });
       setVoiceState("idle");
       if (err.status === 401) {
         localStorage.removeItem("token"); setToken(null);
@@ -929,7 +1055,21 @@ export default function App() {
   // ===================== RESTAURANT SELECTION =====================
 
   const selectRestaurant = async (r) => {
-    setSelectedRestaurant(r);
+    const resolved = resolvePartneredRestaurant(r, restaurants);
+    if (resolved.id == null || resolved.id === "" || Number.isNaN(Number(resolved.id))) {
+      setShowSuggestions(false);
+      setStatus("Ready.");
+      setMessages((p) => [
+        ...p,
+        {
+          role: "bot",
+          content:
+            `**${r.name}** isn’t on our order menu yet (map-only listing). Pick a restaurant under **Order Now** or type **#** and choose one with the ✓ badge.`,
+        },
+      ]);
+      return;
+    }
+    setSelectedRestaurant(resolved);
     setShowSuggestions(false);
     setTab("chat");
     setActiveCategories([]);
@@ -937,15 +1077,15 @@ export default function App() {
     setCurrentItems([]);
     setStatus("Loading menu...");
 
-    const apiBase = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+    const apiBase = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || "http://localhost:8000");
 
     // Fire both in parallel: fast categories REST + session setup via process_message
-    const catPromise = fetch(`${apiBase}/restaurants/${r.id}/categories`)
+    const catPromise = fetch(`${apiBase}/restaurants/${resolved.id}/categories`)
       .then(res => res.ok ? res.json() : [])
       .catch(() => []);
 
     const sessionPromise = token
-      ? sendMessage(token, buildChatPayload(`#${r.slug}`)).catch(() => null)
+      ? sendMessage(token, buildChatPayload(`#${resolved.slug}`)).catch(() => null)
       : Promise.resolve(null);
 
     // Categories come back first (simple DB query)
@@ -959,7 +1099,7 @@ export default function App() {
     if (sessionRes) {
       if (sessionRes.session_id) setSessionId(sessionRes.session_id);
       // Show welcome message but DON'T override categories (pre-fetch is authoritative)
-      const welcomeText = sessionRes.reply || `Welcome to **${r.name}**! Pick a category or just tell me what you want.`;
+      const welcomeText = sessionRes.reply || `Welcome to **${resolved.name}**! Pick a category or just tell me what you want.`;
       setMessages((p) => [...p, { role: "bot", content: welcomeText }]);
       // If pre-fetch returned nothing, fall back to backend categories
       if ((!cats || cats.length === 0) && sessionRes.categories && sessionRes.categories.length > 0) {
@@ -967,7 +1107,7 @@ export default function App() {
       }
     } else {
       // No token or backend error — still show categories from pre-fetch
-      setMessages((p) => [...p, { role: "bot", content: `Welcome to **${r.name}**! Pick a category or just tell me what you want.` }]);
+      setMessages((p) => [...p, { role: "bot", content: `Welcome to **${resolved.name}**! Pick a category or just tell me what you want.` }]);
     }
     setStatus("Ready.");
   };
@@ -980,9 +1120,21 @@ export default function App() {
       const partnered = restaurants.filter(
         (r) => r.name.toLowerCase().includes(q) || r.slug.toLowerCase().includes(q)
       ).map((r) => ({ ...r, partnered: true }));
-      const nearby = nearbyPlaces.filter(
-        (r) => r.name.toLowerCase().includes(q)
-      ).map((r) => ({ ...r, slug: r.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""), partnered: false }));
+      const partneredNorms = new Set(partnered.map((p) => normRestName(p.name)));
+      const nearby = nearbyPlaces
+        .filter((r) => r.name.toLowerCase().includes(q))
+        .filter((r) => {
+          const nn = normRestName(r.name);
+          for (const pn of partneredNorms) {
+            if (pn === nn || pn.includes(nn) || nn.includes(pn)) return false;
+          }
+          return true;
+        })
+        .map((r) => ({
+          ...r,
+          slug: r.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
+          partnered: false,
+        }));
       const combined = [...partnered, ...nearby];
       setFilteredRestaurants(combined);
       setShowSuggestions(combined.length > 0);
@@ -1561,6 +1713,29 @@ export default function App() {
                     );
                   })()}
 
+                  {/* Voice language: English / Tamil (conversation mode) */}
+                  <div className="voice-lang-row" style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12, color: "#64748b" }}>Voice language / மொழி</span>
+                    <button type="button" className={`voice-lang-btn ${voiceLanguage === "en" ? "active" : ""}`}
+                      onClick={() => setVoiceLanguage("en")}
+                      style={{
+                        padding: "6px 12px", borderRadius: 8, border: `2px solid ${voiceLanguage === "en" ? "#2563eb" : "#e2e8f0"}`,
+                        background: voiceLanguage === "en" ? "#2563eb" : "#fff", color: voiceLanguage === "en" ? "#fff" : "#334155",
+                        cursor: "pointer", fontWeight: 600, fontSize: 13,
+                      }}>
+                      English
+                    </button>
+                    <button type="button" className={`voice-lang-btn ${voiceLanguage === "ta" ? "active" : ""}`}
+                      onClick={() => setVoiceLanguage("ta")}
+                      style={{
+                        padding: "6px 12px", borderRadius: 8, border: `2px solid ${voiceLanguage === "ta" ? "#2563eb" : "#e2e8f0"}`,
+                        background: voiceLanguage === "ta" ? "#2563eb" : "#fff", color: voiceLanguage === "ta" ? "#fff" : "#334155",
+                        cursor: "pointer", fontWeight: 600, fontSize: 13,
+                      }}>
+                      தமிழ் (Tamil)
+                    </button>
+                  </div>
+
                   {/* Compact voice status bar (non-blocking) */}
                   {voiceMode && (
                     <div className="voice-status-bar">
@@ -1577,9 +1752,9 @@ export default function App() {
                   <form onSubmit={handleSend} className="ai-chat-input-row" style={{ position: 'relative' }}>
                     <input ref={inputRef} className="ai-chat-input" value={messageText}
                       onChange={handleInputChange} onKeyDown={handleKeyDown}
-                      placeholder={voiceMode ? "Voice active — speak or type..." : "Type # for restaurants, or ask anything..."} />
+                      placeholder={voiceMode ? (voiceLanguage === "ta" ? "பேசுங்கள் அல்லது தட்டச்சு செய்யுங்கள்..." : "Voice active — speak or type...") : "Type # for restaurants, or ask anything..."} />
                     <button type="button" className={`mic-btn ${voiceMode ? "voice-active" : ""}`} onClick={toggleVoiceMode}
-                      title={voiceMode ? "End voice mode" : "Start voice mode"}>
+                      title={voiceMode ? "End voice mode" : "Start conversation (voice)"}>
                       {voiceMode ? "🔴" : "🎤"}
                     </button>
                     <button type="submit" className="send-btn">➤</button>
@@ -1639,8 +1814,11 @@ export default function App() {
                         <div className="orders-section-title">In Progress</div>
                         {activeOrders.map((order) => {
                           const steps = ['confirmed', 'accepted', 'preparing', 'ready', 'completed'];
+                          const stepLabels = { confirmed: '📋 Ordered', accepted: '✅ Accepted', preparing: '🍳 Preparing', ready: '📦 Ready', completed: '🎉 Picked Up' };
                           const isRejected = order.status === 'rejected';
                           const currentStep = isRejected ? -1 : steps.indexOf(order.status);
+                          const etaMins = order.estimated_ready_at ? Math.max(0, Math.round((new Date(order.estimated_ready_at) - Date.now()) / 60000)) : null;
+                          const queuePos = order.queue_position || 0;
                           return (
                             <motion.div key={order.id} className={`order-card ${isRejected ? 'rejected' : ''}`}
                               initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
@@ -1651,6 +1829,15 @@ export default function App() {
                                 </div>
                                 <div className="order-price">${(order.total_cents / 100).toFixed(2)}</div>
                               </div>
+
+                              {/* ETA & Queue Badge */}
+                              {!isRejected && (etaMins !== null || queuePos > 0) && (
+                                <div className="order-eta-bar">
+                                  {etaMins !== null && <div className="eta-countdown">⏱️ Ready in ~{etaMins} min</div>}
+                                  {queuePos > 0 && <div className="queue-badge">{queuePos === 1 ? '🔥 You\'re next!' : `📊 ${queuePos - 1} order${queuePos - 1 > 1 ? 's' : ''} ahead`}</div>}
+                                </div>
+                              )}
+
                               <div className="order-items-summary">
                                 {order.items.map((it) => `${it.quantity}x ${it.name}`).join(', ')}
                               </div>
@@ -1661,7 +1848,7 @@ export default function App() {
                                   {steps.map((s, i) => (
                                     <div key={s} className={`progress-step ${i <= currentStep ? 'active' : ''} ${i === currentStep ? 'current' : ''}`}>
                                       <div className="progress-dot" />
-                                      <span className="progress-label">{s === 'confirmed' ? 'Ordered' : s.charAt(0).toUpperCase() + s.slice(1)}</span>
+                                      <span className="progress-label">{stepLabels[s] || s}</span>
                                     </div>
                                   ))}
                                 </div>

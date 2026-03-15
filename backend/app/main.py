@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from . import chat, crud, intent_extractor, models, optimizer, payments, schemas
-from .auth import create_access_token, get_current_user, verify_password
+from .auth import create_access_token, get_current_user, get_current_user_optional, verify_password
 from .config import settings
 from .db import get_db, engine
 from .voice import router as voice_router
@@ -38,6 +38,16 @@ app.add_middleware(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/health/sarvam")
+async def health_sarvam():
+    """Check if Sarvam AI chat API is configured and callable (used for menu item matching)."""
+    from . import sarvam_service
+    ok, err = sarvam_service.check_chat_available()
+    if ok:
+        return {"status": "ok", "sarvam": "available"}
+    return {"status": "degraded", "sarvam": "unavailable", "error": err}
 
 
 # Global exception handler for better error diagnostics on Vercel
@@ -272,7 +282,14 @@ def restaurants(
     radius_miles: float = 25.0,
     db: Session = Depends(get_db),
 ):
-    all_restaurants = crud.list_restaurants(db, query)
+    try:
+        all_restaurants = crud.list_restaurants(db, query)
+    except Exception as e:
+        print(f"[ERROR] /restaurants list_restaurants failed: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database unavailable: {str(e)}. Check DATABASE_URL and that the DB is running.",
+        ) from e
 
     if lat is not None and lng is not None:
         results = []
@@ -1373,6 +1390,8 @@ def owner_analytics(
 # --- Owner: Update order status ---
 @app.patch("/owner/orders/{order_id}/status")
 def update_order_status(order_id: int, payload: dict, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    from datetime import datetime, timedelta
+
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -1387,9 +1406,126 @@ def update_order_status(order_id: int, payload: dict, db: Session = Depends(get_
     valid = ["accepted", "rejected", "preparing", "ready", "completed"]
     if new_status not in valid:
         raise HTTPException(status_code=400, detail=f"Status must be one of: {valid}")
+
+    now = datetime.utcnow()
     order.status = new_status
+    order.status_updated_at = now
+
+    # When preparing starts, set ETA
+    if new_status == "preparing":
+        prep_mins = rest.avg_prep_minutes or 20
+        order.estimated_ready_at = now + timedelta(minutes=prep_mins)
+
+    # When ready/completed, clear ETA and auto-adjust restaurant avg prep time
+    if new_status in ("ready", "completed"):
+        order.estimated_ready_at = None
+        # Calculate actual prep time and update rolling average
+        if order.status_updated_at:
+            # Find when "preparing" started by looking at recent history
+            # For simplicity, use time since last status change
+            pass  # Will be refined when we have status history
+
     db.commit()
-    return {"ok": True, "order_id": order_id, "status": new_status}
+    return {"ok": True, "order_id": order_id, "status": new_status,
+            "estimated_ready_at": order.estimated_ready_at.isoformat() if order.estimated_ready_at else None}
+
+
+# --- Customer: Track order progress ---
+@app.get("/orders/{order_id}/track")
+def track_order(order_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """Get real-time tracking info for a customer's order."""
+    from datetime import datetime
+
+    order = db.query(models.Order).filter(
+        models.Order.id == order_id,
+        models.Order.user_id == current_user.id
+    ).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Queue position: count of orders ahead at same restaurant
+    active_statuses = ["confirmed", "accepted", "preparing"]
+    if order.status in active_statuses:
+        queue_position = db.query(models.Order).filter(
+            models.Order.restaurant_id == order.restaurant_id,
+            models.Order.status.in_(active_statuses),
+            models.Order.created_at < order.created_at,
+            models.Order.id != order.id,
+        ).count() + 1  # +1 for this order's position
+    else:
+        queue_position = 0
+
+    # Build progress steps
+    STATUS_STEPS = [
+        ("confirmed", "Order Confirmed"),
+        ("accepted", "Accepted"),
+        ("preparing", "Preparing"),
+        ("ready", "Ready for Pickup"),
+        ("completed", "Picked Up"),
+    ]
+    status_order = [s[0] for s in STATUS_STEPS]
+    current_idx = status_order.index(order.status) if order.status in status_order else -1
+
+    steps = []
+    for i, (status_key, label) in enumerate(STATUS_STEPS):
+        if i < current_idx:
+            step_status = "done"
+        elif i == current_idx:
+            step_status = "active"
+        else:
+            step_status = "upcoming"
+        steps.append({"name": label, "key": status_key, "status": step_status})
+
+    # ETA
+    now = datetime.utcnow()
+    eta_minutes = None
+    if order.estimated_ready_at and order.estimated_ready_at > now:
+        eta_minutes = int((order.estimated_ready_at - now).total_seconds() / 60)
+
+    # Elapsed since order placed
+    elapsed_minutes = int((now - order.created_at).total_seconds() / 60)
+
+    # Restaurant info
+    rest = db.query(models.Restaurant).filter(models.Restaurant.id == order.restaurant_id).first()
+
+    return {
+        "order_id": order.id,
+        "status": order.status,
+        "queue_position": queue_position,
+        "estimated_ready_at": order.estimated_ready_at.isoformat() if order.estimated_ready_at else None,
+        "eta_minutes": eta_minutes,
+        "elapsed_minutes": elapsed_minutes,
+        "steps": steps,
+        "restaurant_name": rest.name if rest else "Unknown",
+        "total_cents": order.total_cents,
+        "created_at": order.created_at.isoformat(),
+    }
+
+
+# --- Public: Restaurant kitchen queue info ---
+@app.get("/restaurant/{restaurant_id}/queue")
+def restaurant_queue(restaurant_id: int, db: Session = Depends(get_db)):
+    """Get current kitchen load for a restaurant (shown on restaurant cards)."""
+    rest = db.query(models.Restaurant).filter(models.Restaurant.id == restaurant_id).first()
+    if not rest:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+
+    active_statuses = ["confirmed", "accepted", "preparing"]
+    active_count = db.query(models.Order).filter(
+        models.Order.restaurant_id == restaurant_id,
+        models.Order.status.in_(active_statuses),
+    ).count()
+
+    avg_wait = rest.avg_prep_minutes or 20
+    # Estimate total wait = avg_prep * ceil(active_orders / 2) (assuming 2 parallel orders)
+    estimated_wait = avg_wait * max(1, (active_count + 1) // 2) if active_count > 0 else 0
+
+    return {
+        "restaurant_id": restaurant_id,
+        "active_orders": active_count,
+        "avg_prep_minutes": avg_wait,
+        "estimated_wait_minutes": estimated_wait,
+    }
 
 
 # --- Owner: Update notification settings ---
@@ -1800,19 +1936,33 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
 
 # --- Customer: My Orders (track status) ---
 @app.get("/my-orders")
-def my_orders(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
-    """Get all non-pending orders for the current customer, newest first."""
+def my_orders(db: Session = Depends(get_db), current_user=Depends(get_current_user_optional)):
+    """Get all non-pending orders for the current customer, newest first. Returns [] when not logged in."""
+    if current_user is None:
+        return []
     orders = db.query(models.Order).filter(
         models.Order.user_id == current_user.id,
         models.Order.status != "pending"
     ).order_by(models.Order.created_at.desc()).limit(20).all()
     results = []
+    active_statuses = ["confirmed", "accepted", "preparing"]
     for o in orders:
-        rest = db.query(models.Restaurant).get(o.restaurant_id)
+        rest = db.query(models.Restaurant).filter(models.Restaurant.id == o.restaurant_id).first()
         items = []
         for oi in o.items:
-            mi = db.query(models.MenuItem).get(oi.menu_item_id)
+            mi = db.query(models.MenuItem).filter(models.MenuItem.id == oi.menu_item_id).first()
             items.append({"name": mi.name if mi else "?", "quantity": oi.quantity, "price_cents": oi.price_cents})
+
+        # Queue position for active orders
+        queue_position = 0
+        if o.status in active_statuses:
+            queue_position = db.query(models.Order).filter(
+                models.Order.restaurant_id == o.restaurant_id,
+                models.Order.status.in_(active_statuses),
+                models.Order.created_at < o.created_at,
+                models.Order.id != o.id,
+            ).count() + 1
+
         results.append({
             "id": o.id,
             "status": o.status,
@@ -1821,6 +1971,9 @@ def my_orders(db: Session = Depends(get_db), current_user=Depends(get_current_us
             "restaurant_name": rest.name if rest else "?",
             "restaurant_id": o.restaurant_id,
             "items": items,
+            "estimated_ready_at": o.estimated_ready_at.isoformat() if o.estimated_ready_at else None,
+            "status_updated_at": o.status_updated_at.isoformat() if o.status_updated_at else None,
+            "queue_position": queue_position,
         })
     return results
 

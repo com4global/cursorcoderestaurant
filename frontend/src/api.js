@@ -1,4 +1,5 @@
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+// In dev, use same origin so Vite proxy forwards to backend (no CORS); in prod use env or default
+const API_BASE = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || "http://localhost:8000");
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, options);
@@ -126,8 +127,7 @@ export async function importMenuFromUrl(token, url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 180000); // 3 minute timeout
   try {
-    const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
-    const resp = await fetch(`${API}/owner/import-menu`, {
+    const resp = await fetch(`${API_BASE}/owner/import-menu`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ url }),
@@ -260,8 +260,7 @@ export async function fetchMyOrders(token) {
 export async function voiceSTT(audioBlob) {
   const formData = new FormData();
   formData.append("file", audioBlob, "audio.webm");
-  const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
-  const resp = await fetch(`${API}/api/voice/stt`, {
+  const resp = await fetch(`${API_BASE}/api/voice/stt`, {
     method: "POST",
     body: formData,
   });
@@ -273,8 +272,7 @@ export async function voiceSTT(audioBlob) {
 }
 
 export async function voiceTTS(text, language = "en-IN", speaker = "kavya") {
-  const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
-  const resp = await fetch(`${API}/api/voice/tts`, {
+  const resp = await fetch(`${API_BASE}/api/voice/tts`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text, language, speaker }),
@@ -287,8 +285,7 @@ export async function voiceTTS(text, language = "en-IN", speaker = "kavya") {
 }
 
 export async function voiceChat(message, context = "") {
-  const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
-  const resp = await fetch(`${API}/api/voice/chat`, {
+  const resp = await fetch(`${API_BASE}/api/voice/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, context }),
@@ -343,6 +340,18 @@ export async function verifyPayment(token, sessionId) {
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId }),
   });
+}
+
+// --- Order Tracking & Kitchen Queue ---
+
+export async function trackOrder(token, orderId) {
+  return request(`/orders/${orderId}/track`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getRestaurantQueue(restaurantId) {
+  return request(`/restaurant/${restaurantId}/queue`);
 }
 
 // --- AI Budget Optimizer ---

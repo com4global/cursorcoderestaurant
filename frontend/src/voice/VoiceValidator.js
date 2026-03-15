@@ -44,15 +44,23 @@ const CLEANING_RULES = [
     [/^(?:hey|yo)\s+/i, ''],                                        // "hey show me" → "show me"
 ];
 
+/** True if text contains Tamil or other Indic/non-Latin script (allow through keyword check). */
+function hasNonLatinScript(text) {
+    if (!text || !text.trim()) return false;
+    // Tamil: U+0B80–U+0BFF; other Indic blocks often present in Tamil transcriptions
+    return /[\u0B80-\u0BFF\u0900-\u097F]/.test(text);
+}
+
 /**
  * Validate and clean voice transcript through production pipeline.
  * 
  * @param {string} rawText - Raw speech transcript
  * @param {number} confidence - Speech confidence score (0-1), 0 = not available
  * @param {Array} restaurants - Available restaurants for name matching
+ * @param {{ language?: string }} options - Optional: { language: 'ta' } to skip English-only keyword check
  * @returns {{ valid: boolean, text: string, reason: string, confidence: number, layers: string[] }}
  */
-export function validateVoiceInput(rawText, confidence = 0, restaurants = []) {
+export function validateVoiceInput(rawText, confidence = 0, restaurants = [], options = {}) {
     const result = {
         valid: true,
         text: rawText.trim(),
@@ -101,23 +109,32 @@ export function validateVoiceInput(rawText, confidence = 0, restaurants = []) {
         lower.includes(r.name.toLowerCase()) || lower.includes((r.slug || '').toLowerCase())
     );
 
-    // Short inputs (1-3 words) get a pass — might be category names like "Soups"
+    // Tamil / non-Latin: skip keyword rejection so "change restaurant to Aroma" etc. reach backend
+    const isTamilOrNonLatin = options.language === 'ta' || hasNonLatinScript(cleaned);
     const wordCount = cleaned.split(/\s+/).length;
-    if (!hasFoodKw && !hasCmdKw && !hasRestaurant && wordCount > 4) {
-        result.valid = false;
-        result.reason = 'no_keywords';
-        result.layers.push(`❌ L3: No food/command/restaurant keywords in ${wordCount}-word input`);
-        return result;
+
+    if (!isTamilOrNonLatin) {
+        // Short inputs (1-3 words) get a pass — might be category names like "Soups"
+        if (!hasFoodKw && !hasCmdKw && !hasRestaurant && wordCount > 4) {
+            result.valid = false;
+            result.reason = 'no_keywords';
+            result.layers.push(`❌ L3: No food/command/restaurant keywords in ${wordCount}-word input`);
+            return result;
+        }
+    } else {
+        result.layers.push('✅ L3: Tamil/non-Latin input — allowing through');
     }
 
     const matched = [];
     if (hasFoodKw) matched.push('food');
     if (hasCmdKw) matched.push('command');
     if (hasRestaurant) matched.push('restaurant');
-    result.layers.push(matched.length > 0
-        ? `✅ L3: Keywords: ${matched.join(', ')}`
-        : `⚠️ L3: No keywords but short input (${wordCount} words) — allowing`
-    );
+    if (!isTamilOrNonLatin) {
+        result.layers.push(matched.length > 0
+            ? `✅ L3: Keywords: ${matched.join(', ')}`
+            : `⚠️ L3: No keywords but short input (${wordCount} words) — allowing`
+        );
+    }
 
     // ─── Layer 4: Deferred to IntentParser ───────────────────────
     result.layers.push('✅ L4: Restaurant validation in IntentParser');

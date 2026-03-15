@@ -175,3 +175,22 @@ def chat_completion(
         raise RuntimeError(f"Sarvam chat error ({e.code}): {error_body}")
     except Exception as e:
         raise RuntimeError(f"Sarvam chat error: {str(e)}")
+
+
+def check_chat_available() -> tuple[bool, str | None]:
+    """
+    Verify Sarvam chat API is callable (e.g. for menu item matching).
+    Returns (True, None) if OK, (False, error_message) otherwise.
+    """
+    if not SARVAM_API_KEY or not SARVAM_API_KEY.strip():
+        return False, "SARVAM_API_KEY not set"
+    try:
+        out = chat_completion(
+            "Reply with the number 1.",
+            system_prompt="Reply with only the digit 1.",
+        )
+        if out and "1" in "".join(c for c in out if c.isdigit()):
+            return True, None
+        return False, f"Unexpected response: {out!r}"
+    except Exception as e:
+        return False, str(e)

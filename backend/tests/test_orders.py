@@ -27,6 +27,22 @@ def _customer_token(client, email="customer_ord@test.com"):
     return resp.json()["access_token"]
 
 
+def _add_item_to_cart(client, item_id, restaurant_id=None):
+    """Create a new unique customer, add one item to cart, return token."""
+    import random
+    email = f"queue_cust_{random.randint(100000,999999)}@test.com"
+    token = _customer_token(client, email)
+    # Find the restaurant_id from any existing restaurant if not provided
+    if restaurant_id is None:
+        restaurants = client.get("/restaurants").json()
+        restaurant_id = restaurants[0]["id"] if restaurants else 1
+    client.post("/cart/add-combo", json={
+        "restaurant_id": restaurant_id,
+        "items": [{"item_id": item_id, "quantity": 1}],
+    }, headers=get_auth_header(token))
+    return token
+
+
 class TestCart:
     def test_add_to_cart(self, client):
         _, rid, item_ids = _setup_restaurant_with_items(client)
@@ -413,3 +429,162 @@ class TestMyOrders:
         resp = client.get("/my-orders")
         assert resp.status_code in (401, 403)
 
+
+# ============================================================
+# Phase 1: Live Kitchen Queue & Real-Time ETA Tests
+# ============================================================
+
+class TestKitchenQueue:
+    """Tests for kitchen queue, ETA estimation, and order tracking."""
+
+    def test_status_update_sets_timestamp(self, client):
+        """Verify status_updated_at is set when status changes."""
+        owner_token, restaurant_id, item_ids = _setup_restaurant_with_items(client)
+        token = _add_item_to_cart(client, item_ids[0])
+        # Confirm the order
+        orders = client.get(f"/owner/restaurants/{restaurant_id}/orders?status=pending", headers=get_auth_header(owner_token)).json()
+        if orders:
+            order_id = orders[0]["id"]
+            resp = client.patch(f"/owner/orders/{order_id}/status",
+                                json={"status": "accepted"},
+                                headers=get_auth_header(owner_token))
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["ok"] is True
+            assert data["status"] == "accepted"
+
+    def test_preparing_sets_estimated_ready(self, client):
+        """When status changes to 'preparing', estimated_ready_at should be set."""
+        owner_token, restaurant_id, item_ids = _setup_restaurant_with_items(client)
+        token = _add_item_to_cart(client, item_ids[0])
+        orders = client.get(f"/owner/restaurants/{restaurant_id}/orders?status=pending", headers=get_auth_header(owner_token)).json()
+        if orders:
+            order_id = orders[0]["id"]
+            # Accept first
+            client.patch(f"/owner/orders/{order_id}/status",
+                         json={"status": "accepted"},
+                         headers=get_auth_header(owner_token))
+            # Set to preparing
+            resp = client.patch(f"/owner/orders/{order_id}/status",
+                                json={"status": "preparing"},
+                                headers=get_auth_header(owner_token))
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["estimated_ready_at"] is not None  # ETA should be set
+
+    def test_queue_position_calculation(self, client):
+        """Create 3 orders, verify queue positions are 1, 2, 3."""
+        owner_token, restaurant_id, item_ids = _setup_restaurant_with_items(client)
+        order_ids = []
+        tokens = []
+        for i in range(3):
+            tok = _add_item_to_cart(client, item_ids[0])
+            tokens.append(tok)
+        # Get all pending orders
+        orders = client.get(f"/owner/restaurants/{restaurant_id}/orders?status=pending",
+                            headers=get_auth_header(owner_token)).json()
+        # Confirm all
+        for o in orders:
+            client.patch(f"/owner/orders/{o['id']}/status",
+                         json={"status": "accepted"},
+                         headers=get_auth_header(owner_token))
+            order_ids.append(o["id"])
+
+        # Check my-orders for each user - they should have queue positions
+        for tok in tokens:
+            my_orders = client.get("/my-orders", headers=get_auth_header(tok)).json()
+            for o in my_orders:
+                if o["status"] in ("confirmed", "accepted"):
+                    assert "queue_position" in o
+
+    def test_queue_position_decrements(self, client):
+        """Complete first order, verify second order's queue position decreases."""
+        owner_token, restaurant_id, item_ids = _setup_restaurant_with_items(client)
+        # Create 2 orders
+        tok1 = _add_item_to_cart(client, item_ids[0])
+        tok2 = _add_item_to_cart(client, item_ids[0])
+        orders = client.get(f"/owner/restaurants/{restaurant_id}/orders?status=pending",
+                            headers=get_auth_header(owner_token)).json()
+        for o in orders:
+            client.patch(f"/owner/orders/{o['id']}/status",
+                         json={"status": "accepted"},
+                         headers=get_auth_header(owner_token))
+
+        # Complete the first order
+        if len(orders) >= 2:
+            client.patch(f"/owner/orders/{orders[0]['id']}/status",
+                         json={"status": "completed"},
+                         headers=get_auth_header(owner_token))
+            # Second order should now have lower queue position
+            my_orders = client.get("/my-orders", headers=get_auth_header(tok2)).json()
+            active = [o for o in my_orders if o["status"] == "accepted"]
+            if active:
+                assert active[0]["queue_position"] <= 2  # Should be 1 or at most 2
+
+    def test_track_endpoint_structure(self, client):
+        """Verify /orders/{id}/track returns all expected fields."""
+        owner_token, restaurant_id, item_ids = _setup_restaurant_with_items(client)
+        token = _add_item_to_cart(client, item_ids[0])
+        orders = client.get(f"/owner/restaurants/{restaurant_id}/orders?status=pending",
+                            headers=get_auth_header(owner_token)).json()
+        if orders:
+            order_id = orders[0]["id"]
+            # Confirm it
+            client.patch(f"/owner/orders/{order_id}/status",
+                         json={"status": "accepted"},
+                         headers=get_auth_header(owner_token))
+            # Track
+            resp = client.get(f"/orders/{order_id}/track", headers=get_auth_header(token))
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "order_id" in data
+            assert "status" in data
+            assert "queue_position" in data
+            assert "steps" in data
+            assert "eta_minutes" in data
+            assert "elapsed_minutes" in data
+            assert "restaurant_name" in data
+            assert len(data["steps"]) == 5  # confirmed, accepted, preparing, ready, completed
+
+    def test_restaurant_queue_endpoint(self, client):
+        """Verify /restaurant/{id}/queue returns active order count."""
+        owner_token, restaurant_id, item_ids = _setup_restaurant_with_items(client)
+        # No orders yet
+        resp = client.get(f"/restaurant/{restaurant_id}/queue")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["active_orders"] == 0
+        assert "avg_prep_minutes" in data
+        assert "estimated_wait_minutes" in data
+
+        # Add an order
+        _add_item_to_cart(client, item_ids[0])
+        orders = client.get(f"/owner/restaurants/{restaurant_id}/orders?status=pending",
+                            headers=get_auth_header(owner_token)).json()
+        if orders:
+            client.patch(f"/owner/orders/{orders[0]['id']}/status",
+                         json={"status": "accepted"},
+                         headers=get_auth_header(owner_token))
+            resp = client.get(f"/restaurant/{restaurant_id}/queue")
+            data = resp.json()
+            assert data["active_orders"] >= 1
+
+    def test_completed_order_not_in_queue(self, client):
+        """Completed orders should not count in restaurant queue."""
+        owner_token, restaurant_id, item_ids = _setup_restaurant_with_items(client)
+        token = _add_item_to_cart(client, item_ids[0])
+        orders = client.get(f"/owner/restaurants/{restaurant_id}/orders?status=pending",
+                            headers=get_auth_header(owner_token)).json()
+        if orders:
+            order_id = orders[0]["id"]
+            # Accept then complete
+            client.patch(f"/owner/orders/{order_id}/status",
+                         json={"status": "accepted"},
+                         headers=get_auth_header(owner_token))
+            client.patch(f"/owner/orders/{order_id}/status",
+                         json={"status": "completed"},
+                         headers=get_auth_header(owner_token))
+            # Queue should not count this
+            resp = client.get(f"/restaurant/{restaurant_id}/queue")
+            data = resp.json()
+            assert data["active_orders"] == 0

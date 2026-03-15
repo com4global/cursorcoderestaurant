@@ -85,3 +85,20 @@ Wav2Lip/
 .vercel
 frontend/src-tauri/gen/
 .env
+.env.*
+!.env.example
+
+# ============================
+# Testing / Coverage
+# ============================
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+.tox/
+
+# ============================
+# Cursor / Local
+# ============================
+.cursor/
+*.local

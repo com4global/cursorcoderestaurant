@@ -11,11 +11,12 @@
 const DEBOUNCE_MS = 1000; // 1 second of silence before sending (fast response)
 
 export class SpeechRecognizer {
-    constructor() {
+    constructor(options = {}) {
         this.recognition = null;
         this.debounceTimer = null;
         this.finalTranscript = '';
         this.isListening = false;
+        this.lang = options.lang || 'en-IN';
 
         // Callbacks
         this.onLiveTranscript = null;  // (text) => void — live partial text
@@ -48,7 +49,7 @@ export class SpeechRecognizer {
         const recognition = new SR();
         recognition.continuous = true;
         recognition.interimResults = true;
-        recognition.lang = 'en-US';
+        recognition.lang = this.lang;
         recognition.maxAlternatives = 1;
         this.recognition = recognition;
 
@@ -149,6 +150,13 @@ export class SpeechRecognizer {
             this.onStateChange?.('idle');
             return false;
         }
+    }
+
+    /**
+     * Set language for next start (e.g. 'en-IN', 'ta-IN')
+     */
+    setLang(lang) {
+        this.lang = lang || 'en-IN';
     }
 
     /**
