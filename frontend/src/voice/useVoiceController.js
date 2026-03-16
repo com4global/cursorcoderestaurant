@@ -1,16 +1,16 @@
 /**
  * useVoiceController.js — React hook for ultra-low latency voice AI
- * 
+ *
  * Orchestrates: SpeechRecognizer → IntentParser → Chat API → TTSPlayer
- * 
+ *
  * Features:
  * - Continuous speech recognition with live transcript
- * - Fast intent parsing (<10ms) before backend
+ * - Fast intent parsing (<10ms) before backend hit
  * - Streaming text display (word-by-word reveal)
- * - Sentence-chunked TTS (plays first sentence while generating rest)
+ * - Sentence-chunked TTS via AudioContext (iOS-safe)
  * - Barge-in (user interrupts → TTS stops, listening resumes)
  * - Voice state machine: IDLE → LISTENING → PROCESSING → SPEAKING
- * - iOS compatibility: proper audio priming, single-shot STT, controlled restart
+ * - iOS: AudioContext priming, single-shot STT, MediaRecorder fallback for WKWebView
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react';
@@ -20,13 +20,12 @@ import { parseIntent } from './IntentParser.js';
 import { trace, traceError } from './trace.js';
 import { vlog } from './VoiceDebugLogger.js';
 
-// Voice states
 const STATES = { IDLE: 'idle', LISTENING: 'listening', PROCESSING: 'processing', SPEAKING: 'speaking' };
 
 const _isIOS = typeof navigator !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent);
 
 /**
- * Streaming text reveal — reveals text word-by-word for perceived speed
+ * Streaming text reveal — reveals text word-by-word
  */
 function streamTextToCallback(text, callback, intervalMs = 25) {
     const words = text.split(/\s+/);
@@ -35,26 +34,18 @@ function streamTextToCallback(text, callback, intervalMs = 25) {
     const timer = setInterval(() => {
         if (i >= words.length) {
             clearInterval(timer);
-            callback(text); // Ensure full text is shown
+            callback(text);
             return;
         }
         current = current ? current + ' ' + words[i] : words[i];
         callback(current);
         i++;
     }, intervalMs);
-    return () => clearInterval(timer); // Return cancel function
+    return () => clearInterval(timer);
 }
 
 /**
- * useVoiceController hook — plug into any React component
- * 
- * @param {object} config
- * @param {string} config.apiBase - Backend API URL (e.g. "http://localhost:8000")
- * @param {function} config.onSendMessage - (text, fromVoice) => void — send message to chat
- * @param {function} config.onAddBotMessage - (text) => void — add bot message to chat
- * @param {function} config.doSendRef - ref to doSend function
- * @param {string} config.language - 'en' | 'ta' for English or Tamil (STT + TTS)
- * @returns Voice state and control functions
+ * useVoiceController hook
  */
 export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
     const [voiceMode, setVoiceMode] = useState(false);
@@ -71,14 +62,13 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
     const streamCancelRef = useRef(null);
 
     useEffect(() => { languageRef.current = language; }, [language]);
-    // Keep refs in sync
     useEffect(() => { voiceStateRef.current = voiceState; }, [voiceState]);
 
     const ttsLang = language === 'ta' ? 'ta-IN' : 'en-IN';
 
-    // Initialize components
+    // Initialize components — pass apiBase to SpeechRecognizer for MediaRecorder fallback
     useEffect(() => {
-        recognizerRef.current = new SpeechRecognizer({ lang: ttsLang });
+        recognizerRef.current = new SpeechRecognizer({ lang: ttsLang, apiBase });
         ttsPlayerRef.current = new TTSPlayer(apiBase);
 
         return () => {
@@ -91,11 +81,11 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
         if (recognizerRef.current) recognizerRef.current.setLang(language === 'ta' ? 'ta-IN' : 'en-IN');
     }, [language]);
 
-    // ---- Barge-in: stop TTS when user speaks ----
+    // Barge-in: stop TTS when user speaks
     const bargeIn = useCallback(() => {
         if (ttsPlayerRef.current?.isPlaying) {
             ttsPlayerRef.current.stop();
-            vlog('STATE', 'Barge-in: TTS stopped by user speech');
+            vlog('STATE', 'Barge-in: TTS stopped');
         }
         if (streamCancelRef.current) {
             streamCancelRef.current();
@@ -104,56 +94,47 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
         setVoiceState(STATES.LISTENING);
     }, []);
 
-    // ---- Process finalized speech ----
+    // Process finalized speech
     const handleFinalTranscript = useCallback(async (text, confidence = 0) => {
         if (!text.trim() || !voiceModeRef.current) return;
 
         const confStr = confidence > 0 ? (confidence * 100).toFixed(0) + '%' : 'N/A';
         trace('voice.finalTranscript', { text, confidence: confStr });
-        vlog('STT', `Final transcript: "${text}" (${confStr})`);
-        console.log(`%c[Voice] 🎤 Final transcript: "${text}" (confidence: ${confStr})`, 'color: #00ff88; font-weight: bold; font-size: 13px');
+        vlog('STT', `Final: "${text}" (${confStr})`);
 
         setVoiceState(STATES.PROCESSING);
         setLiveTranscript('');
         setVoiceTranscript(text);
 
-        // Send to chat engine via doSend (handles all intents, cart, ordering)
         if (doSendRef?.current) {
-            vlog('STATE', `Sending to doSend: "${text.substring(0, 50)}"`);
+            vlog('STATE', `→ doSend: "${text.substring(0, 50)}"`);
             try {
                 await doSendRef.current(text, true, confidence);
-                trace('voice.doSendComplete', { text: text.substring(0, 60) });
                 vlog('STATE', 'doSend completed');
             } catch (err) {
                 traceError('voice.doSendError', err, { text: text.substring(0, 60) });
                 vlog('ERR', `doSend error: ${err.message}`);
             }
-        } else {
-            vlog('ERR', 'doSendRef.current is null');
         }
     }, [doSendRef]);
 
-    // ---- Start listening ----
+    // Start listening
     const startListening = useCallback(() => {
         if (!voiceModeRef.current) return;
         const recognizer = recognizerRef.current;
         if (!recognizer) return;
 
-        vlog('STT', 'startListening() called', { iOS: _isIOS });
+        vlog('STT', 'startListening()', { iOS: _isIOS });
 
         recognizer.setLang(languageRef.current === 'ta' ? 'ta-IN' : 'en-IN');
 
         recognizer.onLiveTranscript = (text) => {
             setLiveTranscript(text);
             setIsListening(true);
-            if (!recognizer._lastLogTime || Date.now() - recognizer._lastLogTime > 500) {
-                console.log('%c[Voice] 🔊 Hearing: "' + text + '"', 'color: #888');
-                recognizer._lastLogTime = Date.now();
-            }
         };
         recognizer.onFinalTranscript = handleFinalTranscript;
         recognizer.onStateChange = (state) => {
-            vlog('STATE', `STT state → ${state}`);
+            vlog('STATE', `STT → ${state}`);
             if (state === 'listening') {
                 setVoiceState(STATES.LISTENING);
                 setIsListening(true);
@@ -162,10 +143,7 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
             }
         };
         recognizer.onSpeechDetected = () => {
-            // Barge-in: if TTS is playing and user speaks, stop it
-            if (voiceStateRef.current === STATES.SPEAKING) {
-                bargeIn();
-            }
+            if (voiceStateRef.current === STATES.SPEAKING) bargeIn();
         };
         recognizer.onError = (err) => {
             vlog('ERR', `STT error: ${err}`);
@@ -176,49 +154,44 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
         recognizer.start();
     }, [handleFinalTranscript, bargeIn]);
 
-    // ---- Speak via Sarvam AI TTS ----
+    // Speak via TTS — with guaranteed restart of STT after
     const speak = useCallback((text) => {
         if (!voiceModeRef.current || !text) return;
 
-        // Cancel any ongoing speech
         ttsPlayerRef.current?.stop();
-
-        vlog('TTS', `speak() called: "${(text || '').substring(0, 60)}"`);
-
+        vlog('TTS', `speak(): "${(text || '').substring(0, 60)}"`);
         setVoiceState(STATES.SPEAKING);
 
-        // Wire up TTSPlayer callbacks for this utterance
         const player = ttsPlayerRef.current;
-        player.onComplete = () => {
-            vlog('STATE', 'TTS onComplete → restarting STT');
+
+        // CRITICAL: Always restart listening after TTS completes OR fails.
+        // This prevents the cycle from getting stuck.
+        const restartListening = () => {
             if (voiceModeRef.current) {
+                vlog('STATE', 'TTS done → restarting STT');
                 setVoiceState(STATES.LISTENING);
-                // Always restart listening after TTS completes
-                // On iOS: SpeechRecognizer now handles single-shot mode properly
                 startListening();
             }
         };
+
+        player.onComplete = restartListening;
         player.onStateChange = (state) => {
-            vlog('STATE', `TTS state → ${state}`);
+            vlog('STATE', `TTS → ${state}`);
             if (state === 'speaking') setVoiceState(STATES.SPEAKING);
-            else if (state === 'idle' && voiceModeRef.current) setVoiceState(STATES.LISTENING);
         };
 
         const lang = languageRef.current === 'ta' ? 'ta-IN' : 'en-IN';
         player.speak(text, { lang }).catch((err) => {
             vlog('ERR', `TTS speak error: ${err.message}`);
-            if (voiceModeRef.current) {
-                setVoiceState(STATES.LISTENING);
-                startListening();
-            }
+            restartListening(); // Always restart even on failure
         });
     }, [startListening]);
 
-    // ---- Toggle voice mode ----
+    // Toggle voice mode
     const toggleVoiceMode = useCallback(async () => {
         if (voiceMode) {
-            // === TURN OFF ===
-            vlog('STATE', 'Voice mode OFF');
+            // === OFF ===
+            vlog('STATE', 'Voice OFF');
             voiceModeRef.current = false;
             setVoiceMode(false);
             setVoiceState(STATES.IDLE);
@@ -229,48 +202,44 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
             ttsPlayerRef.current?.stop();
             if (streamCancelRef.current) { streamCancelRef.current(); streamCancelRef.current = null; }
         } else {
-            // === TURN ON ===
-            vlog('STATE', 'Voice mode ON', { iOS: _isIOS });
+            // === ON ===
+            vlog('STATE', 'Voice ON', { iOS: _isIOS });
 
-            // iOS: prime the TTS audio element IN THIS USER GESTURE
-            // This must happen synchronously in the tap handler
-            if (_isIOS) {
-                ttsPlayerRef.current?.primeForIOS();
-            }
+            // CRITICAL: Prime AudioContext during this user gesture (tap)
+            // This is the ONE chance to unlock audio on iOS
+            ttsPlayerRef.current?.primeForIOS();
 
             voiceModeRef.current = true;
             setVoiceMode(true);
             setVoiceState(STATES.LISTENING);
 
-            // Start recognition synchronously (required on iOS)
-            startListening();
+            // Request mic permission first, then greet + listen
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                stream.getTracks().forEach(t => t.stop());
+                vlog('MIC', 'Mic permission granted');
+            } catch (err) {
+                vlog('ERR', `Mic permission: ${err.name} ${err.message}`);
+                if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                    setVoiceTranscript('⚠️ Microphone blocked — enable in settings');
+                } else if (err.name === 'NotFoundError') {
+                    setVoiceTranscript('⚠️ No microphone found');
+                } else {
+                    setVoiceTranscript('⚠️ Mic error: ' + (err.message || err.name));
+                }
+                setTimeout(() => setVoiceTranscript(''), 4000);
+                return; // Don't start if mic denied
+            }
 
-            // Request mic permission and play greeting after
-            navigator.mediaDevices.getUserMedia({ audio: true })
-                .then((stream) => {
-                    stream.getTracks().forEach(t => t.stop());
-                    vlog('MIC', 'Microphone permission granted');
-                    const greet = languageRef.current === 'ta'
-                        ? "வணக்கம்! நீங்கள் என்ன சாப்பிட விரும்புகிறீர்கள்?"
-                        : "Hello! What would you like to eat?";
-                    speak(greet);
-                })
-                .catch((err) => {
-                    vlog('ERR', `Mic permission error: ${err.name} ${err.message}`);
-                    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-                        setVoiceTranscript('⚠️ Microphone blocked — enable in browser settings');
-                    } else if (err.name === 'NotFoundError') {
-                        setVoiceTranscript('⚠️ No microphone found');
-                    } else {
-                        setVoiceTranscript('⚠️ Mic error: ' + (err.message || err.name));
-                    }
-                    setTimeout(() => setVoiceTranscript(''), 4000);
-                });
+            // Speak greeting (TTS will call restartListening when done)
+            const greet = languageRef.current === 'ta'
+                ? "வணக்கம்! நீங்கள் என்ன சாப்பிட விரும்புகிறீர்கள்?"
+                : "Hello! What would you like to eat?";
+            speak(greet);
         }
-    }, [voiceMode, startListening, speak]);
+    }, [voiceMode, speak]);
 
     return {
-        // State
         voiceMode,
         voiceState,
         setVoiceState,
@@ -278,17 +247,14 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
         voiceTranscript,
         isListening,
 
-        // Refs (for App.jsx compatibility)
         voiceModeRef,
         voiceStateRef,
 
-        // Controls
         toggleVoiceMode,
-        speak,          // Manually trigger TTS
-        bargeIn,        // Stop TTS
-        startListening, // Manually start STT
+        speak,
+        bargeIn,
+        startListening,
 
-        // For streaming text display
         streamText: (text, callback) => {
             if (streamCancelRef.current) streamCancelRef.current();
             streamCancelRef.current = streamTextToCallback(text, callback);
