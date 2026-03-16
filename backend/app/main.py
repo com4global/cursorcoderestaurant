@@ -21,7 +21,10 @@ from .db import get_db, engine
 from .voice import router as voice_router
 from .ai_dashboard import router as ai_dashboard_router
 
-models.Base.metadata.create_all(bind=engine)
+try:
+    models.Base.metadata.create_all(bind=engine)
+except Exception as _db_err:
+    print(f"[startup] DB create_all skipped: {_db_err}")
 
 
 def _ensure_chat_sessions_columns():
