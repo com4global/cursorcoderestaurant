@@ -6,12 +6,3 @@
 [build.environment]
   VITE_API_BASE = "https://backend-mu-blush-55.vercel.app"
 
-[[redirects]]
-  from = "/voice-test.html"
-  to = "/voice-test.html"
-  status = 200
-
-[[redirects]]
-  from = "/*"
-  to = "/index.html"
-  status = 200
