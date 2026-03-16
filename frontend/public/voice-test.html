@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Diagnostics</title>
+    <style>
+        body {
+            font-family: -apple-system, sans-serif;
+            background: #111;
+            color: #0f0;
+            padding: 16px;
+            font-size: 14px;
+        }
+
+        h1 {
+            font-size: 18px;
+            color: #fff;
+        }
+
+        .log {
+            background: #000;
+            border: 1px solid #333;
+            padding: 8px;
+            margin: 8px 0;
+            border-radius: 6px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+
+        button {
+            background: #f80;
+            color: #000;
+            border: none;
+            padding: 14px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: bold;
+            margin: 6px 4px;
+            cursor: pointer;
+            display: inline-block;
+        }
+
+        button:active {
+            background: #fa0;
+        }
+
+        .ok {
+            color: #0f0;
+        }
+
+        .fail {
+            color: #f44;
+        }
+
+        .warn {
+            color: #ff0;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>🔍 iOS Voice Diagnostics</h1>
+    <div id="log" class="log">Tap "Run All Tests" to start...\n</div>
+
+    <button onclick="runAll()">🧪 Run All Tests</button>
+    <button onclick="testMic()">🎤 Test Mic</button>
+    <button onclick="testSTT()">🗣️ Test STT</button>
+    <button onclick="testTTS()">🔊 Test TTS</button>
+    <button onclick="testAudioCtx()">🎵 Test AudioContext</button>
+
+    <script>
+        const API = "https://backend-mu-blush-55.vercel.app";
+        const log = document.getElementById('log');
+        function L(msg, cls = '') {
+            const span = document.createElement('span');
+            span.className = cls;
+            span.textContent = new Date().toLocaleTimeString() + ' ' + msg + '\n';
+            log.appendChild(span);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        async function runAll() {
+            log.textContent = '';
+            L('=== Environment ===');
+            L('UserAgent: ' + navigator.userAgent);
+            L('Platform: ' + navigator.platform);
+            L('SpeechRecognition: ' + !!(window.SpeechRecognition || window.webkitSpeechRecognition), !!(window.SpeechRecognition || window.webkitSpeechRecognition) ? 'ok' : 'fail');
+            L('MediaRecorder: ' + (typeof MediaRecorder !== 'undefined'), typeof MediaRecorder !== 'undefined' ? 'ok' : 'fail');
+            L('AudioContext: ' + !!(window.AudioContext || window.webkitAudioContext), !!(window.AudioContext || window.webkitAudioContext) ? 'ok' : 'fail');
+            L('getUserMedia: ' + !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia), !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) ? 'ok' : 'fail');
+            L('HTTPS: ' + (location.protocol === 'https:'), location.protocol === 'https:' ? 'ok' : 'fail');
+            L('');
+            L('=== API Connectivity ===');
+            try {
+                const r = await fetch(API + '/restaurants');
+                L('GET /restaurants: ' + r.status, r.ok ? 'ok' : 'fail');
+            } catch (e) { L('GET /restaurants: FAILED - ' + e.message, 'fail'); }
+            try {
+                const r = await fetch(API + '/api/voice/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'test', language: 'en-IN', speaker: 'kavya' }) });
+                const d = await r.json();
+                L('POST /api/voice/tts: ' + r.status + ' audio=' + (d.audio_base64 || '').length + ' chars', r.ok ? 'ok' : 'fail');
+            } catch (e) { L('POST /api/voice/tts: FAILED - ' + e.message, 'fail'); }
+        }
+
+        async function testMic() {
+            L('--- Mic Test ---');
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                L('✅ Mic granted! Tracks: ' + stream.getTracks().length, 'ok');
+                stream.getTracks().forEach(t => t.stop());
+            } catch (e) {
+                L('❌ Mic denied: ' + e.name + ' ' + e.message, 'fail');
+            }
+        }
+
+        async function testSTT() {
+            L('--- STT Test ---');
+            const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SR) {
+                L('❌ SpeechRecognition NOT available', 'fail');
+                L('Will try MediaRecorder fallback...', 'warn');
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    const recorder = new MediaRecorder(stream);
+                    L('✅ MediaRecorder available as fallback', 'ok');
+                    const chunks = [];
+                    recorder.ondataavailable = e => chunks.push(e.data);
+                    recorder.onstop = async () => {
+                        stream.getTracks().forEach(t => t.stop());
+                        const blob = new Blob(chunks, { type: recorder.mimeType });
+                        L('Recorded ' + (blob.size / 1024).toFixed(1) + 'KB, sending to backend STT...', 'warn');
+                        const fd = new FormData();
+                        fd.append('file', blob, 'audio.webm');
+                        try {
+                            const r = await fetch(API + '/api/voice/stt', { method: 'POST', body: fd });
+                            const d = await r.json();
+                            L('✅ Backend STT result: "' + (d.transcript || '') + '"', d.transcript ? 'ok' : 'warn');
+                        } catch (e) {
+                            L('❌ Backend STT error: ' + e.message, 'fail');
+                        }
+                    };
+                    recorder.start();
+                    L('🎤 Recording 4 seconds... speak now!', 'warn');
+                    setTimeout(() => recorder.stop(), 4000);
+                } catch (e) {
+                    L('❌ MediaRecorder also failed: ' + e.message, 'fail');
+                }
+                return;
+            }
+            L('✅ SpeechRecognition exists', 'ok');
+            const recognition = new SR();
+            recognition.continuous = false;
+            recognition.interimResults = false;
+            recognition.lang = 'en-IN';
+            recognition.onstart = () => L('STT started — speak now...', 'warn');
+            recognition.onresult = (e) => {
+                const t = e.results[0][0].transcript;
+                const c = e.results[0][0].confidence;
+                L('✅ STT result: "' + t + '" (confidence: ' + (c * 100).toFixed(0) + '%)', 'ok');
+            };
+            recognition.onerror = (e) => L('❌ STT error: ' + e.error, 'fail');
+            recognition.onend = () => L('STT ended', 'warn');
+            try {
+                recognition.start();
+                L('recognition.start() called', 'ok');
+            } catch (e) {
+                L('❌ recognition.start() failed: ' + e.message, 'fail');
+            }
+        }
+
+        async function testTTS() {
+            L('--- TTS Test (AudioContext) ---');
+            const AC = window.AudioContext || window.webkitAudioContext;
+            if (!AC) { L('❌ AudioContext not available', 'fail'); return; }
+            const ctx = new AC();
+            L('AudioContext state: ' + ctx.state, ctx.state === 'running' ? 'ok' : 'warn');
+            try {
+                await ctx.resume();
+                L('AudioContext after resume: ' + ctx.state, ctx.state === 'running' ? 'ok' : 'fail');
+            } catch (e) { L('❌ resume failed: ' + e.message, 'fail'); }
+            // Play silent buffer
+            try {
+                const buf = ctx.createBuffer(1, 1, ctx.sampleRate);
+                const src = ctx.createBufferSource();
+                src.buffer = buf; src.connect(ctx.destination); src.start(0);
+                L('✅ Silent buffer played', 'ok');
+            } catch (e) { L('❌ Silent buffer failed: ' + e.message, 'fail'); }
+            // Fetch real TTS
+            L('Fetching TTS from Sarvam API...', 'warn');
+            try {
+                const r = await fetch(API + '/api/voice/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'Hello, this is a test.', language: 'en-IN', speaker: 'kavya' }) });
+                const d = await r.json();
+                if (!d.audio_base64) { L('❌ No audio_base64 in response', 'fail'); return; }
+                L('Got ' + d.audio_base64.length + ' chars of audio', 'ok');
+                // Decode and play
+                const bytes = atob(d.audio_base64);
+                const arr = new Uint8Array(bytes.length);
+                for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+                const audioBuf = await ctx.decodeAudioData(arr.buffer);
+                L('Decoded audio: ' + audioBuf.duration.toFixed(1) + 's', 'ok');
+                const source = ctx.createBufferSource();
+                source.buffer = audioBuf;
+                source.connect(ctx.destination);
+                source.onended = () => L('✅ Audio playback COMPLETE', 'ok');
+                source.start(0);
+                L('✅ source.start(0) called — you should HEAR audio now', 'ok');
+            } catch (e) {
+                L('❌ TTS play error: ' + e.message, 'fail');
+            }
+        }
+
+        async function testAudioCtx() {
+            L('--- AudioContext Only ---');
+            const AC = window.AudioContext || window.webkitAudioContext;
+            if (!AC) { L('❌ No AudioContext', 'fail'); return; }
+            const ctx = new AC();
+            L('Initial state: ' + ctx.state);
+            await ctx.resume();
+            L('After resume: ' + ctx.state, ctx.state === 'running' ? 'ok' : 'fail');
+            // Generate a 440Hz tone for 0.5s
+            const osc = ctx.createOscillator();
+            osc.frequency.value = 440;
+            osc.connect(ctx.destination);
+            osc.start();
+            setTimeout(() => { osc.stop(); L('✅ 440Hz tone played for 0.5s', 'ok'); }, 500);
+        }
+    </script>
+</body>
+
+</html>
