@@ -170,18 +170,3 @@ class Payment(Base):
 
     user = relationship("User", backref="payments")
 
-
-class VoiceLog(Base):
-    """Persistent log for voice STT calls — used for debugging iOS voice issues."""
-    __tablename__ = "voice_logs"
-
-    id = Column(Integer, primary_key=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
-    filename = Column(String(100), nullable=True)
-    content_type = Column(String(100), nullable=True)
-    audio_kb = Column(Float, nullable=True)
-    language = Column(String(20), nullable=True)
-    transcript = Column(Text, nullable=True)
-    detected_lang = Column(String(20), nullable=True)
-    duration_ms = Column(Integer, nullable=True)
-    error = Column(Text, nullable=True)

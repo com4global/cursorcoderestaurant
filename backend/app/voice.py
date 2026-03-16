@@ -17,82 +17,50 @@ from .db import get_db
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
-# ---------- STT Trace Log (persisted to DB) ----------
+# ---------- STT Trace Log (in-memory, last 50 calls) ----------
 import time as _time
-from datetime import datetime
-
-
-def _ensure_voice_log_table():
-    """Auto-create voice_logs table if it doesn't exist."""
-    try:
-        from .db import engine
-        models.VoiceLog.__table__.create(engine, checkfirst=True)
-    except Exception as e:
-        print(f"[VoiceLog] Table create skipped: {e}")
+from collections import deque
+_stt_log = deque(maxlen=50)
 
 
 @router.get("/stt-log")
-async def get_stt_log(limit: int = 30, db: Session = Depends(get_db)):
-    """Retrieve recent STT call logs from database for debugging."""
-    _ensure_voice_log_table()
-    try:
-        logs = (
-            db.query(models.VoiceLog)
-            .order_by(models.VoiceLog.id.desc())
-            .limit(limit)
-            .all()
-        )
-        return {
-            "count": len(logs),
-            "logs": [
-                {
-                    "id": log.id,
-                    "ts": log.timestamp.strftime("%H:%M:%S") if log.timestamp else None,
-                    "filename": log.filename,
-                    "content_type": log.content_type,
-                    "audio_kb": log.audio_kb,
-                    "language": log.language,
-                    "transcript": log.transcript,
-                    "detected_lang": log.detected_lang,
-                    "duration_ms": log.duration_ms,
-                    "error": log.error,
-                }
-                for log in logs
-            ],
-        }
-    except Exception as e:
-        return {"count": 0, "logs": [], "error": str(e)}
+async def get_stt_log():
+    """Retrieve recent STT call logs for debugging."""
+    return {"logs": list(_stt_log), "count": len(_stt_log)}
 
 
 # ---------- STT ----------
 
 @router.post("/stt")
-async def speech_to_text(file: UploadFile = File(...), language: str = Form("en-IN"), db: Session = Depends(get_db)):
+async def speech_to_text(file: UploadFile = File(...), language: str = Form("en-IN")):
     """Transcribe uploaded audio using Sarvam Saaras v3."""
-    _ensure_voice_log_table()
     t0 = _time.time()
     audio_bytes = await file.read()
     filename = file.filename or "audio.webm"
     content_type = file.content_type or "unknown"
     audio_kb = len(audio_bytes) / 1024
 
-    log = models.VoiceLog(
-        timestamp=datetime.utcnow(),
-        filename=filename,
-        content_type=content_type,
-        audio_kb=round(audio_kb, 1),
-        language=language,
-    )
+    log_entry = {
+        "ts": _time.strftime("%Y-%m-%d %H:%M:%S"),
+        "filename": filename,
+        "content_type": content_type,
+        "audio_kb": round(audio_kb, 1),
+        "language_requested": language,
+        "transcript": None,
+        "detected_lang": None,
+        "duration_ms": None,
+        "error": None,
+    }
 
     print(f"[STT] ← {audio_kb:.1f}KB | file={filename} | type={content_type} | lang={language}")
 
     if len(audio_bytes) == 0:
-        log.error = "Empty audio"
-        db.add(log); db.commit()
+        log_entry["error"] = "Empty audio"
+        _stt_log.append(log_entry)
         raise HTTPException(400, "Empty audio file")
     if len(audio_bytes) > 10 * 1024 * 1024:
-        log.error = "Too large"
-        db.add(log); db.commit()
+        log_entry["error"] = "Too large"
+        _stt_log.append(log_entry)
         raise HTTPException(400, "Audio file too large (max 10MB)")
 
     try:
@@ -105,19 +73,19 @@ async def speech_to_text(file: UploadFile = File(...), language: str = Form("en-
         transcript = result.get("transcript", "")
         detected = result.get("language", "")
 
-        log.transcript = transcript
-        log.detected_lang = detected
-        log.duration_ms = round(elapsed)
-        db.add(log); db.commit()
+        log_entry["transcript"] = transcript
+        log_entry["detected_lang"] = detected
+        log_entry["duration_ms"] = round(elapsed)
 
         print(f"[STT] → \"{transcript}\" | detected={detected} | ⏱{elapsed:.0f}ms")
+        _stt_log.append(log_entry)
         return result
     except RuntimeError as e:
         elapsed = (_time.time() - t0) * 1000
-        log.error = str(e)[:500]
-        log.duration_ms = round(elapsed)
-        db.add(log); db.commit()
+        log_entry["error"] = str(e)[:200]
+        log_entry["duration_ms"] = round(elapsed)
         print(f"[STT] ✗ {str(e)[:100]} | ⏱{elapsed:.0f}ms")
+        _stt_log.append(log_entry)
         raise HTTPException(502, str(e))
 
 
