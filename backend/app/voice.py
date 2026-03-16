@@ -17,25 +17,107 @@ from .db import get_db
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
+# ---------- STT Trace Log (persisted to DB) ----------
+import time as _time
+from datetime import datetime
+
+
+def _ensure_voice_log_table():
+    """Auto-create voice_logs table if it doesn't exist."""
+    try:
+        from .db import engine
+        models.VoiceLog.__table__.create(engine, checkfirst=True)
+    except Exception as e:
+        print(f"[VoiceLog] Table create skipped: {e}")
+
+
+@router.get("/stt-log")
+async def get_stt_log(limit: int = 30, db: Session = Depends(get_db)):
+    """Retrieve recent STT call logs from database for debugging."""
+    _ensure_voice_log_table()
+    try:
+        logs = (
+            db.query(models.VoiceLog)
+            .order_by(models.VoiceLog.id.desc())
+            .limit(limit)
+            .all()
+        )
+        return {
+            "count": len(logs),
+            "logs": [
+                {
+                    "id": log.id,
+                    "ts": log.timestamp.strftime("%H:%M:%S") if log.timestamp else None,
+                    "filename": log.filename,
+                    "content_type": log.content_type,
+                    "audio_kb": log.audio_kb,
+                    "language": log.language,
+                    "transcript": log.transcript,
+                    "detected_lang": log.detected_lang,
+                    "duration_ms": log.duration_ms,
+                    "error": log.error,
+                }
+                for log in logs
+            ],
+        }
+    except Exception as e:
+        return {"count": 0, "logs": [], "error": str(e)}
+
 
 # ---------- STT ----------
 
 @router.post("/stt")
-async def speech_to_text(file: UploadFile = File(...)):
+async def speech_to_text(file: UploadFile = File(...), language: str = Form("en-IN"), db: Session = Depends(get_db)):
     """Transcribe uploaded audio using Sarvam Saaras v3."""
+    _ensure_voice_log_table()
+    t0 = _time.time()
     audio_bytes = await file.read()
+    filename = file.filename or "audio.webm"
+    content_type = file.content_type or "unknown"
+    audio_kb = len(audio_bytes) / 1024
+
+    log = models.VoiceLog(
+        timestamp=datetime.utcnow(),
+        filename=filename,
+        content_type=content_type,
+        audio_kb=round(audio_kb, 1),
+        language=language,
+    )
+
+    print(f"[STT] ← {audio_kb:.1f}KB | file={filename} | type={content_type} | lang={language}")
+
     if len(audio_bytes) == 0:
+        log.error = "Empty audio"
+        db.add(log); db.commit()
         raise HTTPException(400, "Empty audio file")
-    if len(audio_bytes) > 10 * 1024 * 1024:  # 10MB max
+    if len(audio_bytes) > 10 * 1024 * 1024:
+        log.error = "Too large"
+        db.add(log); db.commit()
         raise HTTPException(400, "Audio file too large (max 10MB)")
 
     try:
         result = sarvam_service.transcribe_audio(
             audio_bytes,
-            filename=file.filename or "audio.webm",
+            filename=filename,
+            language_code=language,
         )
+        elapsed = (_time.time() - t0) * 1000
+        transcript = result.get("transcript", "")
+        detected = result.get("language", "")
+
+        log.transcript = transcript
+        log.detected_lang = detected
+        log.duration_ms = round(elapsed)
+        db.add(log); db.commit()
+
+        print(f"[STT] → \"{transcript}\" | detected={detected} | ⏱{elapsed:.0f}ms")
         return result
     except RuntimeError as e:
+        elapsed = (_time.time() - t0) * 1000
+        log.error = str(e)[:500]
+        log.duration_ms = round(elapsed)
+        db.add(log); db.commit()
+        print(f"[STT] ✗ {str(e)[:100]} | ⏱{elapsed:.0f}ms")
         raise HTTPException(502, str(e))
 
 
@@ -78,35 +160,11 @@ class ChatRequest(BaseModel):
     context: str = ""
 
 
-def _is_group_order_intent(message: str) -> bool:
-    """Detect if user is asking for group ordering (voice or text)."""
-    import re
-    lower = message.strip().lower()
-    phrases = (
-        "group order", "group ordering", "start a group order", "order as a group",
-        "order for a group", "order together", "group food", "group lunch", "group dinner",
-        "office lunch", "company lunch", "order for the team", "order for the office",
-    )
-    if any(p in lower for p in phrases):
-        return True
-    if re.search(r"(?:find|get|order|want|need)\s+(?:food|meals?|lunch|dinner)\s+for\s+\d+\s+people", lower):
-        return True
-    return False
-
-
 @router.post("/chat")
 async def voice_chat(req: ChatRequest):
     """Get intelligent response from Sarvam AI agent."""
     if not req.message.strip():
         raise HTTPException(400, "Message cannot be empty")
-
-    # Group order intent: return fixed reply and signal frontend to open Group tab (no LLM call)
-    if _is_group_order_intent(req.message):
-        reply = (
-            "I've opened the Group Order tab for you. Start a group order, share the link with friends, "
-            "add their preferences, and get AI recommendations for the whole group!"
-        )
-        return {"reply": reply, "open_group_tab": True}
 
     system_prompt = (
         "You are a friendly restaurant ordering assistant. "
@@ -225,6 +283,5 @@ async def voice_converse(
         "categories": result.get("categories"),
         "items": result.get("items"),
         "cart_summary": result.get("cart_summary"),
-        "open_group_tab": result.get("open_group_tab"),
     }
 

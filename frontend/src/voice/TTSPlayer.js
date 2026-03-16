@@ -1,26 +1,20 @@
 /**
- * TTSPlayer.js — Sentence-chunked streaming TTS using AudioContext (iOS-safe)
+ * TTSPlayer.js — TTS playback with iOS fallback chain
  *
- * Uses Web Audio API (AudioContext) instead of <audio> element because:
- * - AudioContext.resume() only needs ONE user gesture, then all subsequent
- *   audio plays work (even async). Audio elements lose gesture context on src change.
- * - Works in WKWebView (Tauri iOS) where <audio> behavior is very restricted.
- *
- * Uses Sarvam Bulbul v3 (Indian accent, "kavya" speaker).
+ * Playback strategy (tries in order):
+ * 1. AudioContext + decodeAudioData (callback form for iOS compat)
+ * 2. Audio element with data:audio/wav;base64 URI (fallback)
+ * 3. Skip chunk and continue (graceful degradation)
  */
 
 import { vlog } from './VoiceDebugLogger.js';
 
 const DEFAULT_SPEAKER = 'kavya';
 const DEFAULT_LANG = 'en-IN';
-
 const _isIOS = typeof navigator !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent);
 
-/**
- * Clean text for TTS (remove markdown, emoji, etc.)
- */
 function cleanForTTS(text) {
-    let clean = text
+    return text
         .replace(/\*\*|__|~~|`/g, '')
         .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
         .replace(/#{1,6}\s*/g, '')
@@ -28,18 +22,14 @@ function cleanForTTS(text) {
         .replace(/\n+/g, '. ')
         .replace(/\s+/g, ' ')
         .trim();
-    return clean;
 }
 
-/**
- * Split text into speakable sentence chunks (10-150 chars)
- */
 function splitIntoChunks(text) {
     const sentences = text.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 0);
     const chunks = [];
     let buffer = '';
     for (const sentence of sentences) {
-        if (buffer.length + sentence.length < 150) {
+        if (buffer.length + sentence.length < 500) {
             buffer = buffer ? buffer + ' ' + sentence : sentence;
         } else {
             if (buffer) chunks.push(buffer.trim());
@@ -47,15 +37,10 @@ function splitIntoChunks(text) {
         }
     }
     if (buffer.trim()) chunks.push(buffer.trim());
-    if (chunks.length === 0 && text.trim()) {
-        chunks.push(text.trim().substring(0, 2000));
-    }
+    if (chunks.length === 0 && text.trim()) chunks.push(text.trim().substring(0, 2000));
     return chunks;
 }
 
-/**
- * Generate TTS audio for a text chunk via Sarvam API
- */
 async function generateChunkAudio(apiBase, text, speaker = DEFAULT_SPEAKER, lang = DEFAULT_LANG) {
     if (!text || text.trim().length < 2) return null;
     try {
@@ -65,12 +50,9 @@ async function generateChunkAudio(apiBase, text, speaker = DEFAULT_SPEAKER, lang
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text: text.substring(0, 2000), language: lang, speaker }),
         });
-        if (!resp.ok) {
-            vlog('ERR', `TTS fetch failed: ${resp.status}`);
-            return null;
-        }
+        if (!resp.ok) { vlog('ERR', `TTS fetch: ${resp.status}`); return null; }
         const data = await resp.json();
-        vlog('TTS', `TTS audio received`, { hasAudio: !!data.audio_base64, len: (data.audio_base64 || '').length });
+        vlog('TTS', `audio received`, { len: (data.audio_base64 || '').length });
         return data.audio_base64 || null;
     } catch (err) {
         vlog('ERR', `TTS fetch error: ${err.message}`);
@@ -78,206 +60,211 @@ async function generateChunkAudio(apiBase, text, speaker = DEFAULT_SPEAKER, lang
     }
 }
 
-/**
- * Decode base64 string to ArrayBuffer for AudioContext.decodeAudioData
- */
 function base64ToArrayBuffer(base64) {
-    const binaryStr = atob(base64);
-    const len = binaryStr.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) bytes[i] = binaryStr.charCodeAt(i);
+    const bin = atob(base64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     return bytes.buffer;
 }
 
-/**
- * TTSPlayer class — manages streaming TTS playback via AudioContext
- */
 export class TTSPlayer {
     constructor(apiBase) {
         this.apiBase = apiBase;
         this._audioCtx = null;
         this._currentSource = null;
+        this._currentAudio = null;
         this.isPlaying = false;
         this.isCancelled = false;
-        this._primed = false;
         this.onStateChange = null;
         this.onChunkStart = null;
         this.onComplete = null;
-        vlog('TTS', 'TTSPlayer constructed (AudioContext mode)', { iOS: _isIOS });
+        vlog('TTS', 'TTSPlayer constructed', { iOS: _isIOS });
     }
 
-    /**
-     * Get or create AudioContext. Lazily created so it can be resumed during user gesture.
-     */
     _getAudioContext() {
         if (!this._audioCtx) {
             const AC = window.AudioContext || window.webkitAudioContext;
-            if (!AC) {
-                vlog('ERR', 'AudioContext not supported');
-                return null;
-            }
+            if (!AC) return null;
             this._audioCtx = new AC();
-            vlog('TTS', `AudioContext created, state: ${this._audioCtx.state}`);
+            vlog('TTS', `AudioContext created: ${this._audioCtx.state}`);
         }
         return this._audioCtx;
     }
 
     /**
-     * Prime AudioContext for iOS — MUST be called during a user gesture (tap).
-     * This resumes the AudioContext (iOS suspends it by default) so all
-     * subsequent audio plays work without needing another gesture.
+     * Prime audio during user gesture tap — CRITICAL for iOS
      */
     primeForIOS() {
         const ctx = this._getAudioContext();
         if (!ctx) return;
 
+        // Resume AudioContext
         if (ctx.state === 'suspended') {
-            ctx.resume().then(() => {
-                this._primed = true;
-                vlog('IOS', `AudioContext RESUMED: ${ctx.state}`);
-            }).catch(err => {
-                vlog('ERR', `AudioContext resume failed: ${err.message}`);
-            });
+            ctx.resume().then(() => vlog('IOS', `AudioContext resumed: ${ctx.state}`))
+                .catch(e => vlog('ERR', `resume fail: ${e.message}`));
         } else {
-            this._primed = true;
-            vlog('IOS', `AudioContext already running: ${ctx.state}`);
+            vlog('IOS', `AudioContext already: ${ctx.state}`);
         }
 
-        // Also play a tiny silent buffer to fully unlock the audio pipeline
+        // Play silent buffer to fully unlock audio pipeline
         try {
             const buf = ctx.createBuffer(1, 1, ctx.sampleRate);
             const src = ctx.createBufferSource();
             src.buffer = buf;
             src.connect(ctx.destination);
             src.start(0);
-            vlog('IOS', 'Silent buffer played to prime audio pipeline');
+            vlog('IOS', 'Silent buffer primed');
         } catch (e) {
-            vlog('ERR', `Silent buffer prime failed: ${e.message}`);
+            vlog('ERR', `prime fail: ${e.message}`);
         }
+
+        // ALSO prime an Audio element (belt + suspenders approach)
+        try {
+            const a = new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=');
+            a.volume = 0.01;
+            a.play().then(() => { a.pause(); vlog('IOS', 'Audio element primed'); })
+                .catch(() => vlog('IOS', 'Audio element prime skipped'));
+        } catch (_) { }
     }
 
-    /**
-     * Play text with sentence-chunked streaming TTS
-     */
     async speak(text, { speaker = DEFAULT_SPEAKER, lang = DEFAULT_LANG } = {}) {
         this.stop();
         this.isCancelled = false;
         this.isPlaying = true;
 
         const clean = cleanForTTS(text);
-        vlog('TTS', `speak()`, { cleanLen: clean.length, primed: this._primed });
+        vlog('TTS', `speak()`, { cleanLen: clean.length });
 
-        if (!clean) {
-            this.isPlaying = false;
-            this.onComplete?.();
-            return;
-        }
+        if (!clean) { this.isPlaying = false; this.onComplete?.(); return; }
 
         const chunks = splitIntoChunks(clean);
-        if (chunks.length === 0) {
-            this.isPlaying = false;
-            this.onComplete?.();
-            return;
-        }
+        if (chunks.length === 0) { this.isPlaying = false; this.onComplete?.(); return; }
 
         this.onStateChange?.('speaking');
-        vlog('TTS', `${chunks.length} chunk(s) to speak`);
+        vlog('TTS', `${chunks.length} chunk(s)`);
 
-        // Ensure AudioContext is created and resumed
-        const ctx = this._getAudioContext();
-        if (!ctx) {
-            vlog('ERR', 'No AudioContext — skipping TTS');
-            this.isPlaying = false;
-            this.onComplete?.();
-            return;
-        }
-        if (ctx.state === 'suspended') {
-            try { await ctx.resume(); } catch (_) { }
-            vlog('TTS', `AudioContext state after resume attempt: ${ctx.state}`);
-        }
+        // Pre-fetch all chunks
+        const audioPromises = chunks.map(c => generateChunkAudio(this.apiBase, c, speaker, lang));
 
-        // Pre-fetch ALL chunks in parallel
-        const audioPromises = chunks.map(chunk => generateChunkAudio(this.apiBase, chunk, speaker, lang));
-
-        // Play chunks sequentially
         for (let i = 0; i < chunks.length; i++) {
             if (this.isCancelled) break;
-
             const audioBase64 = await audioPromises[i];
             if (this.isCancelled || !audioBase64) continue;
-
             this.onChunkStart?.(i, chunks.length);
             vlog('TTS', `Playing chunk ${i + 1}/${chunks.length}`);
             await this._playAudioChunk(audioBase64);
         }
 
-        // Cleanup
         this.isPlaying = false;
         this._currentSource = null;
+        this._currentAudio = null;
 
         if (!this.isCancelled) {
-            vlog('TTS', 'All chunks played, calling onComplete');
+            vlog('TTS', 'All done → onComplete');
             this.onStateChange?.('idle');
             this.onComplete?.();
         }
     }
 
     /**
-     * Play a single audio chunk via AudioContext (no Audio element needed)
+     * Play audio chunk — tries AudioContext first, falls back to Audio element
      */
-    _playAudioChunk(base64) {
-        return new Promise(async (resolve) => {
-            if (this.isCancelled) { resolve(); return; }
+    async _playAudioChunk(base64) {
+        if (this.isCancelled) return;
 
-            const ctx = this._audioCtx;
-            if (!ctx) { resolve(); return; }
-
+        // METHOD 1: Try AudioContext + decodeAudioData (callback form for iOS)
+        const ctx = this._audioCtx;
+        if (ctx && ctx.state === 'running') {
             try {
-                const arrayBuffer = base64ToArrayBuffer(base64);
-                const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-
-                if (this.isCancelled) { resolve(); return; }
-
-                const source = ctx.createBufferSource();
-                source.buffer = audioBuffer;
-                source.connect(ctx.destination);
-                this._currentSource = source;
-
-                source.onended = () => {
-                    vlog('TTS', 'chunk onended');
-                    resolve();
-                };
-
-                source.start(0);
-                vlog('TTS', 'AudioContext source.start() SUCCESS');
+                const arrayBuf = base64ToArrayBuffer(base64);
+                const played = await this._playViaAudioContext(ctx, arrayBuf);
+                if (played) return; // Success!
             } catch (err) {
-                vlog('ERR', `AudioContext play error: ${err.message}`);
+                vlog('ERR', `AudioContext play failed: ${err.message}`);
+            }
+        } else {
+            vlog('TTS', `AudioContext not ready: ${ctx?.state || 'null'}`);
+        }
+
+        // METHOD 2: Fallback to Audio element with data URI
+        vlog('TTS', 'Falling back to Audio element');
+        await this._playViaAudioElement(base64);
+    }
+
+    /**
+     * Play via AudioContext using CALLBACK form of decodeAudioData (iOS compatible)
+     */
+    _playViaAudioContext(ctx, arrayBuffer) {
+        return new Promise((resolve) => {
+            if (this.isCancelled) { resolve(false); return; }
+
+            // Use CALLBACK form — the Promise form silently fails on some iOS versions
+            ctx.decodeAudioData(
+                arrayBuffer,
+                (audioBuffer) => {
+                    if (this.isCancelled) { resolve(false); return; }
+                    vlog('TTS', `decoded: ${audioBuffer.duration.toFixed(1)}s`);
+
+                    const source = ctx.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(ctx.destination);
+                    source.playbackRate.value = 1.1;  // Slightly faster speech
+                    this._currentSource = source;
+
+                    source.onended = () => {
+                        vlog('TTS', 'chunk ended');
+                        resolve(true);
+                    };
+
+                    try {
+                        source.start(0);
+                        vlog('TTS', 'AudioContext: playing ✓');
+                    } catch (e) {
+                        vlog('ERR', `source.start fail: ${e.message}`);
+                        resolve(false);
+                    }
+                },
+                (err) => {
+                    vlog('ERR', `decodeAudioData fail: ${err?.message || err}`);
+                    resolve(false);
+                }
+            );
+        });
+    }
+
+    /**
+     * Fallback: play via Audio element with data URI
+     */
+    _playViaAudioElement(base64) {
+        return new Promise((resolve) => {
+            if (this.isCancelled) { resolve(); return; }
+            try {
+                const audio = new Audio('data:audio/wav;base64,' + base64);
+                this._currentAudio = audio;
+                audio.onended = () => { vlog('TTS', 'Audio element ended'); resolve(); };
+                audio.onerror = (e) => { vlog('ERR', `Audio element error: ${e.type}`); resolve(); };
+                const playPromise = audio.play();
+                if (playPromise) {
+                    playPromise.then(() => vlog('TTS', 'Audio element: playing ✓'))
+                        .catch(e => { vlog('ERR', `Audio.play() blocked: ${e.message}`); resolve(); });
+                }
+            } catch (e) {
+                vlog('ERR', `Audio fallback fail: ${e.message}`);
                 resolve();
             }
         });
     }
 
-    /**
-     * Stop playback immediately (for barge-in)
-     */
     stop() {
         this.isCancelled = true;
         this.isPlaying = false;
-        if (this._currentSource) {
-            try { this._currentSource.stop(); } catch (_) { }
-            this._currentSource = null;
-        }
+        if (this._currentSource) { try { this._currentSource.stop(); } catch (_) { } this._currentSource = null; }
+        if (this._currentAudio) { try { this._currentAudio.pause(); this._currentAudio.src = ''; } catch (_) { } this._currentAudio = null; }
     }
 
-    /**
-     * Destroy player and cleanup
-     */
     destroy() {
         this.stop();
-        if (this._audioCtx) {
-            try { this._audioCtx.close(); } catch (_) { }
-            this._audioCtx = null;
-        }
+        if (this._audioCtx) { try { this._audioCtx.close(); } catch (_) { } this._audioCtx = null; }
         this.onStateChange = null;
         this.onChunkStart = null;
         this.onComplete = null;

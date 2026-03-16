@@ -18,7 +18,7 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 SARVAM_BASE = "https://api.sarvam.ai"
 
 
-def transcribe_audio(audio_bytes: bytes, filename: str = "audio.webm") -> dict:
+def transcribe_audio(audio_bytes: bytes, filename: str = "audio.webm", language_code: str = "en-IN") -> dict:
     """
     Send audio to Sarvam Saaras v3 STT.
     Returns {"transcript": str, "language": str}
@@ -46,6 +46,10 @@ def transcribe_audio(audio_bytes: bytes, filename: str = "audio.webm") -> dict:
     body += f"--{boundary}\r\n".encode()
     body += b'Content-Disposition: form-data; name="model"\r\n\r\n'
     body += b"saaras:v3\r\n"
+    # Language code field — CRITICAL: prevents wrong language detection
+    body += f"--{boundary}\r\n".encode()
+    body += b'Content-Disposition: form-data; name="language_code"\r\n\r\n'
+    body += f"{language_code}\r\n".encode()
     # Mode field
     body += f"--{boundary}\r\n".encode()
     body += b'Content-Disposition: form-data; name="mode"\r\n\r\n'
@@ -92,7 +96,7 @@ def generate_speech(
         "model": "bulbul:v3",
         "speaker": speaker,
         "audio_format": "wav",
-        "sample_rate": 22050,
+        "sample_rate": 16000,
     }
 
     body = json.dumps(payload).encode()
@@ -175,22 +179,3 @@ def chat_completion(
         raise RuntimeError(f"Sarvam chat error ({e.code}): {error_body}")
     except Exception as e:
         raise RuntimeError(f"Sarvam chat error: {str(e)}")
-
-
-def check_chat_available() -> tuple[bool, str | None]:
-    """
-    Verify Sarvam chat API is callable (e.g. for menu item matching).
-    Returns (True, None) if OK, (False, error_message) otherwise.
-    """
-    if not SARVAM_API_KEY or not SARVAM_API_KEY.strip():
-        return False, "SARVAM_API_KEY not set"
-    try:
-        out = chat_completion(
-            "Reply with the number 1.",
-            system_prompt="Reply with only the digit 1.",
-        )
-        if out and "1" in "".join(c for c in out if c.isdigit()):
-            return True, None
-        return False, f"Unexpected response: {out!r}"
-    except Exception as e:
-        return False, str(e)

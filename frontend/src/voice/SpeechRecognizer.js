@@ -2,10 +2,15 @@
  * SpeechRecognizer.js — Browser speech recognition with iOS + WKWebView fallback
  *
  * Strategy:
- * - Desktop Chrome/Safari: Use native webkitSpeechRecognition (continuous=true)
- * - iOS Safari/Chrome: Use native webkitSpeechRecognition (continuous=false, single-shot)
- * - WKWebView (Tauri iOS): SpeechRecognition doesn't exist → fallback to
+ * - Desktop Chrome/Safari: Native webkitSpeechRecognition (continuous=true)
+ * - iOS Safari/Chrome: Native webkitSpeechRecognition (continuous=false, single-shot)
+ * - WKWebView (Tauri iOS app): SpeechRecognition doesn't exist → fallback to
  *   MediaRecorder + backend /api/voice/stt (Sarvam Saaras STT)
+ *
+ * iOS improvements:
+ * - Voice Activity Detection (VAD) using AudioContext analyser
+ * - Auto-stop when silence detected (faster response)
+ * - Correct MIME type (audio/mp4 on iOS, audio/webm on Chrome)
  */
 
 import { vlog } from './VoiceDebugLogger.js';
@@ -26,10 +31,12 @@ export class SpeechRecognizer {
         this.apiBase = options.apiBase || '';
         this.keepListeningOnFinal = options.keepListeningOnFinal === true;
         this._intentionallyStopped = false;
-        this._useFallback = false;  // true when using MediaRecorder fallback
+        this._useFallback = false;
         this._mediaRecorder = null;
         this._audioChunks = [];
         this._mediaStream = null;
+        this._recorderTimeout = null;
+        this._vadInterval = null;
 
         // Callbacks
         this.onLiveTranscript = null;
@@ -39,50 +46,34 @@ export class SpeechRecognizer {
         this.onSpeechDetected = null;
     }
 
-    /**
-     * Check if any form of speech recognition is available
-     */
     static isSupported() {
-        // Native Web Speech API
         if (window.SpeechRecognition || window.webkitSpeechRecognition) return true;
-        // Fallback: MediaRecorder for backend STT
         if (navigator.mediaDevices && typeof MediaRecorder !== 'undefined') return true;
         return false;
     }
 
-    /**
-     * Start listening — uses native API or MediaRecorder fallback
-     */
     start() {
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-
         if (SR) {
             this._useFallback = false;
             return this._startNative(SR);
         }
-
-        // Fallback: use MediaRecorder + backend STT
         if (navigator.mediaDevices && typeof MediaRecorder !== 'undefined') {
             vlog('IOS', 'No SpeechRecognition API — using MediaRecorder fallback');
             this._useFallback = true;
             return this._startMediaRecorder();
         }
-
         vlog('ERR', 'No speech recognition available');
         this.onError?.('Speech recognition not supported in this browser');
         return false;
     }
 
-    /**
-     * Start using native SpeechRecognition
-     */
     _startNative(SR) {
         this.stop();
         this.finalTranscript = '';
         this._intentionallyStopped = false;
 
         const recognition = new SR();
-
         if (_isIOSWebKit) {
             recognition.continuous = false;
             recognition.interimResults = false;
@@ -91,7 +82,6 @@ export class SpeechRecognizer {
             recognition.continuous = true;
             recognition.interimResults = true;
         }
-
         recognition.lang = this.lang;
         recognition.maxAlternatives = 1;
         this.recognition = recognition;
@@ -126,12 +116,8 @@ export class SpeechRecognizer {
                 confidence: confidenceCount > 0 ? (confidenceSum / confidenceCount).toFixed(2) : 'N/A'
             });
 
-            if (final) {
-                this.finalTranscript = (this.finalTranscript + ' ' + final).trim();
-            }
-            if (confidenceCount > 0) {
-                this._lastConfidence = confidenceSum / confidenceCount;
-            }
+            if (final) this.finalTranscript = (this.finalTranscript + ' ' + final).trim();
+            if (confidenceCount > 0) this._lastConfidence = confidenceSum / confidenceCount;
             this._lastInterim = interim;
             this.onSpeechDetected?.();
 
@@ -223,8 +209,11 @@ export class SpeechRecognizer {
     }
 
     /**
-     * Fallback: Record audio with MediaRecorder, send to backend /api/voice/stt
-     * Used in WKWebView where SpeechRecognition doesn't exist.
+     * MediaRecorder fallback with Voice Activity Detection (VAD)
+     * - Uses AudioContext analyser to detect speech vs silence
+     * - Auto-stops when 1.5s of silence detected AFTER speech started
+     * - Max recording time: 8s (safety cap)
+     * - Min recording time: 1s (avoid false triggers)
      */
     async _startMediaRecorder() {
         this.stop();
@@ -232,16 +221,26 @@ export class SpeechRecognizer {
         this._audioChunks = [];
 
         try {
-            // Request mic if we don't have a stream yet
-            if (!this._mediaStream) {
-                this._mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            // Get mic stream
+            if (!this._mediaStream || this._mediaStream.getTracks().every(t => t.readyState === 'ended')) {
+                this._mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true,
+                        sampleRate: 16000,
+                    }
+                });
                 vlog('MIC', 'MediaRecorder: mic stream acquired');
             }
 
-            // Determine supported MIME type
+            // Pick best MIME type — iOS prefers mp4
             let mimeType = 'audio/webm';
             if (typeof MediaRecorder.isTypeSupported === 'function') {
-                if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+                // IMPORTANT: Check mp4 FIRST on iOS (native codec, better quality)
+                if (_isIOS && MediaRecorder.isTypeSupported('audio/mp4')) {
+                    mimeType = 'audio/mp4';
+                } else if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
                     mimeType = 'audio/webm;codecs=opus';
                 } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
                     mimeType = 'audio/mp4';
@@ -254,11 +253,88 @@ export class SpeechRecognizer {
             const recorder = new MediaRecorder(this._mediaStream, { mimeType });
             this._mediaRecorder = recorder;
 
+            // Set up VAD (Voice Activity Detection) using AudioContext
+            let speechDetected = false;
+            let silenceStart = null;
+            const SILENCE_THRESHOLD = 15;    // RMS threshold for "silence"
+            const SILENCE_DURATION = 1500;   // ms of silence after speech to auto-stop
+            const MIN_RECORDING = 1000;      // minimum ms before allowing auto-stop
+            const MAX_RECORDING = 8000;      // maximum recording duration
+            const recordStart = Date.now();
+
+            try {
+                const ac = new (window.AudioContext || window.webkitAudioContext)();
+                const source = ac.createMediaStreamSource(this._mediaStream);
+                const analyser = ac.createAnalyser();
+                analyser.fftSize = 512;
+                source.connect(analyser);
+                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+                this._vadInterval = setInterval(() => {
+                    if (recorder.state !== 'recording') {
+                        clearInterval(this._vadInterval);
+                        ac.close().catch(() => { });
+                        return;
+                    }
+
+                    analyser.getByteFrequencyData(dataArray);
+                    // Calculate RMS energy
+                    let sum = 0;
+                    for (let i = 0; i < dataArray.length; i++) sum += dataArray[i] * dataArray[i];
+                    const rms = Math.sqrt(sum / dataArray.length);
+
+                    const elapsed = Date.now() - recordStart;
+
+                    if (rms > SILENCE_THRESHOLD) {
+                        // Speech detected
+                        if (!speechDetected) {
+                            speechDetected = true;
+                            vlog('VAD', `Speech detected (RMS=${rms.toFixed(0)})`);
+                            this.onLiveTranscript?.('🎤 Speaking...');
+                        }
+                        silenceStart = null;
+                    } else if (speechDetected && elapsed > MIN_RECORDING) {
+                        // Silence after speech
+                        if (!silenceStart) {
+                            silenceStart = Date.now();
+                        } else if (Date.now() - silenceStart > SILENCE_DURATION) {
+                            // Enough silence — stop recording
+                            vlog('VAD', `Silence detected for ${SILENCE_DURATION}ms — stopping`);
+                            clearInterval(this._vadInterval);
+                            ac.close().catch(() => { });
+                            if (recorder.state === 'recording') recorder.stop();
+                            return;
+                        }
+                    }
+
+                    // Safety: max recording time
+                    if (elapsed > MAX_RECORDING) {
+                        vlog('VAD', 'Max recording time reached — stopping');
+                        clearInterval(this._vadInterval);
+                        ac.close().catch(() => { });
+                        if (recorder.state === 'recording') recorder.stop();
+                    }
+                }, 100);  // Check every 100ms
+
+            } catch (vadErr) {
+                vlog('ERR', `VAD setup failed (non-fatal): ${vadErr.message}`);
+                // Fall back to simple timeout if VAD fails
+                this._recorderTimeout = setTimeout(() => {
+                    if (recorder.state === 'recording') {
+                        vlog('MIC', 'Auto-stopping MediaRecorder (fallback timeout)');
+                        recorder.stop();
+                    }
+                }, 5000);
+            }
+
             recorder.ondataavailable = (e) => {
                 if (e.data.size > 0) this._audioChunks.push(e.data);
             };
 
             recorder.onstop = async () => {
+                clearInterval(this._vadInterval);
+                clearTimeout(this._recorderTimeout);
+
                 if (this._intentionallyStopped || this._audioChunks.length === 0) {
                     vlog('MIC', 'MediaRecorder stopped (no data or intentional)');
                     this.isListening = false;
@@ -266,14 +342,19 @@ export class SpeechRecognizer {
                     return;
                 }
 
-                const fileExt = mimeType.includes('mp4') ? 'audio.mp4' : mimeType.includes('wav') ? 'audio.wav' : 'audio.webm';
+                const fileExt = mimeType.includes('mp4') ? 'audio.mp4'
+                    : mimeType.includes('wav') ? 'audio.wav'
+                        : 'audio.webm';
                 const blob = new Blob(this._audioChunks, { type: mimeType });
                 this._audioChunks = [];
-                vlog('MIC', `Sending ${(blob.size / 1024).toFixed(1)}KB to backend STT`);
 
-                // Send to backend
+                vlog('MIC', `Sending ${(blob.size / 1024).toFixed(1)}KB (${fileExt}) to backend STT`);
+                this.onLiveTranscript?.('⏳ Processing...');
+
+                // Send to backend STT
                 const formData = new FormData();
                 formData.append('file', blob, fileExt);
+                formData.append('language', this.lang || 'en-IN');
 
                 try {
                     const resp = await fetch(`${this.apiBase}/api/voice/stt`, {
@@ -283,20 +364,24 @@ export class SpeechRecognizer {
                     if (resp.ok) {
                         const data = await resp.json();
                         const transcript = (data.transcript || '').trim();
-                        vlog('STT', `Backend STT result: "${transcript}"`);
+                        vlog('STT', `Backend STT: "${transcript}"`);
                         if (transcript) {
                             this.onLiveTranscript?.(transcript);
                             this.onFinalTranscript?.(transcript, 0.8);
                         } else {
-                            vlog('STT', 'Empty transcript from backend');
+                            vlog('STT', 'Empty transcript');
+                            this.onError?.("Didn't catch that — try speaking closer to mic");
                             this.onStateChange?.('idle');
                         }
                     } else {
-                        vlog('ERR', `Backend STT failed: ${resp.status}`);
+                        const errText = await resp.text().catch(() => '');
+                        vlog('ERR', `Backend STT ${resp.status}: ${errText.substring(0, 200)}`);
+                        this.onError?.('Voice recognition error — please try again');
                         this.onStateChange?.('idle');
                     }
                 } catch (err) {
-                    vlog('ERR', `Backend STT error: ${err.message}`);
+                    vlog('ERR', `Backend STT network error: ${err.message}`);
+                    this.onError?.('Network error — check connection');
                     this.onStateChange?.('idle');
                 }
 
@@ -309,20 +394,12 @@ export class SpeechRecognizer {
                 this.onStateChange?.('idle');
             };
 
-            // Start recording — stop after 5 seconds of silence or max 8 seconds
-            recorder.start();
+            // Start recording with 250ms timeslice (collects data periodically)
+            recorder.start(250);
             this.isListening = true;
             this.onStateChange?.('listening');
             this.onLiveTranscript?.('🎤 Listening...');
-            vlog('MIC', 'MediaRecorder started (auto-stop in 6s)');
-
-            // Auto-stop after 6 seconds (single utterance)
-            this._recorderTimeout = setTimeout(() => {
-                if (recorder.state === 'recording') {
-                    vlog('MIC', 'Auto-stopping MediaRecorder after timeout');
-                    recorder.stop();
-                }
-            }, 6000);
+            vlog('MIC', 'MediaRecorder started with VAD');
 
             return true;
         } catch (err) {
@@ -333,10 +410,8 @@ export class SpeechRecognizer {
         }
     }
 
-    /**
-     * Manually stop recording (user taps again or speaks enough)
-     */
     stopRecording() {
+        clearInterval(this._vadInterval);
         if (this._mediaRecorder && this._mediaRecorder.state === 'recording') {
             clearTimeout(this._recorderTimeout);
             this._mediaRecorder.stop();
@@ -351,6 +426,7 @@ export class SpeechRecognizer {
     stop() {
         clearTimeout(this.debounceTimer);
         clearTimeout(this._recorderTimeout);
+        clearInterval(this._vadInterval);
         this.isListening = false;
         this._intentionallyStopped = true;
 
