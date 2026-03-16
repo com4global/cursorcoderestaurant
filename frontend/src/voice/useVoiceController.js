@@ -72,12 +72,20 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
 
     const ttsLang = language === 'ta' ? 'ta-IN' : 'en-IN';
 
-    // iOS: keep recognizer running after final transcript (restart requires user gesture)
     const isIOS = typeof navigator !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent);
 
-    // Initialize components
+    // Unlock audio on iOS so TTS can play (first play() must be in user gesture)
+    const unlockIOSAudio = useCallback(() => {
+        try {
+            const silentWav = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+            const a = new Audio(silentWav);
+            a.play().catch(() => {});
+        } catch (_) {}
+    }, []);
+
+    // Initialize components (always stop after final to avoid re-transcribing TTS and duplicate messages)
     useEffect(() => {
-        recognizerRef.current = new SpeechRecognizer({ lang: ttsLang, keepListeningOnFinal: isIOS });
+        recognizerRef.current = new SpeechRecognizer({ lang: ttsLang });
         ttsPlayerRef.current = new TTSPlayer(apiBase);
 
         return () => {
@@ -187,7 +195,7 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
         player.onComplete = () => {
             if (voiceModeRef.current) {
                 setVoiceState(STATES.LISTENING);
-                // On iOS we keep the recognizer running (keepListeningOnFinal), so don't restart
+                // On iOS we don't restart (start() requires user gesture); user taps mic again to speak
                 if (!isIOS) startListening();
             }
         };
@@ -230,6 +238,9 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
             // Start recognition synchronously (required on iOS)
             startListening();
 
+            // iOS: unlock audio in this user gesture so TTS can play after async fetch
+            if (isIOS) unlockIOSAudio();
+
             // Request mic permission and play greeting after (no await before startListening)
             navigator.mediaDevices.getUserMedia({ audio: true })
                 .then((stream) => {
@@ -250,7 +261,7 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
                     setTimeout(() => setVoiceTranscript(''), 4000);
                 });
         }
-    }, [voiceMode, startListening, speak]);
+    }, [voiceMode, startListening, speak, isIOS, unlockIOSAudio]);
 
     return {
         // State
