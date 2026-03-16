@@ -17,6 +17,8 @@ export class SpeechRecognizer {
         this.finalTranscript = '';
         this.isListening = false;
         this.lang = options.lang || 'en-IN';
+        /** If true, do not stop after final transcript (iOS: restart requires user gesture) */
+        this.keepListeningOnFinal = options.keepListeningOnFinal === true;
 
         // Callbacks
         this.onLiveTranscript = null;  // (text) => void — live partial text
@@ -107,7 +109,7 @@ export class SpeechRecognizer {
                     this._lastInterim = '';
                     this._lastConfidence = 0;
                     this.onLiveTranscript?.('');
-                    this.stop();
+                    if (!this.keepListeningOnFinal) this.stop();
                     this.onFinalTranscript?.(textToSend, confidence);
                 }
             }, DEBOUNCE_MS);

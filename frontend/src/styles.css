@@ -3642,6 +3642,15 @@ img {
   margin-top: 0.5rem;
 }
 
+/* URL extraction: progress block below the button */
+.extract-loading-url {
+  margin-top: 1.25rem;
+}
+.extract-loading-url .owner-progress-bar {
+  margin: 0.75rem 0 0.5rem;
+  height: 6px;
+}
+
 .extract-dropzone {
   border: 2px dashed rgba(139, 92, 246, 0.3);
   border-radius: 16px;
@@ -4413,11 +4422,17 @@ img {
   padding: 16px 0;
   text-align: center;
 }
+.owner-import-loading .extract-spinner {
+  margin-bottom: 1rem;
+}
+.owner-import-loading .owner-progress-bar {
+  margin: 0 0 12px;
+}
 
 .owner-import-loading p {
   font-size: 0.82rem;
   color: var(--text-dim);
-  margin-top: 12px;
+  margin-top: 0;
 }
 
 .owner-progress-bar {

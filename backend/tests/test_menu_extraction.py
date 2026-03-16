@@ -1,8 +1,9 @@
-"""Tests for menu extraction endpoints (image + document upload)."""
+"""Tests for menu extraction endpoints (image + document upload, URL import)."""
 import io
 import pytest
 from unittest.mock import patch
 from .conftest import get_auth_header, create_test_restaurant
+from app.main import _normalize_menu_import_url
 
 
 def _owner_token(client, email="extract_owner@test.com"):
@@ -143,6 +144,40 @@ class TestDocumentExtraction:
             headers=get_auth_header(token),
         )
         assert resp.status_code == 200
+
+
+class TestImportMenuFromUrl:
+    """URL normalization and validation for owner import-menu (extract from website URL)."""
+
+    def test_normalize_menu_url_adds_https(self):
+        # Anjappar-style URL without scheme — must be normalized so fetch/Playwright work
+        out = _normalize_menu_import_url("anjapparindian.com/menu/anjapparcharlotte")
+        assert out == "https://anjapparindian.com/menu/anjapparcharlotte"
+
+    def test_normalize_menu_url_preserves_https(self):
+        out = _normalize_menu_import_url("https://anjapparindian.com/menu/anjapparcharlotte")
+        assert out == "https://anjapparindian.com/menu/anjapparcharlotte"
+
+    def test_normalize_menu_url_protocol_relative(self):
+        out = _normalize_menu_import_url("//example.com/menu")
+        assert out == "https://example.com/menu"
+
+    def test_import_menu_no_url_returns_400(self, client):
+        token = _owner_token(client, "import_no_url@test.com")
+        resp = client.post(
+            "/owner/import-menu",
+            json={},
+            headers=get_auth_header(token),
+        )
+        assert resp.status_code == 400
+        assert "URL" in resp.json().get("detail", "")
+
+    def test_import_menu_requires_owner_auth(self, client):
+        resp = client.post(
+            "/owner/import-menu",
+            json={"url": "https://anjapparindian.com/menu/anjapparcharlotte"},
+        )
+        assert resp.status_code in (401, 403)
 
 
 class TestSaveImportedMenu:

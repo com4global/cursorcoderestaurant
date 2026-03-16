@@ -72,9 +72,12 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
 
     const ttsLang = language === 'ta' ? 'ta-IN' : 'en-IN';
 
+    // iOS: keep recognizer running after final transcript (restart requires user gesture)
+    const isIOS = typeof navigator !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent);
+
     // Initialize components
     useEffect(() => {
-        recognizerRef.current = new SpeechRecognizer({ lang: ttsLang });
+        recognizerRef.current = new SpeechRecognizer({ lang: ttsLang, keepListeningOnFinal: isIOS });
         ttsPlayerRef.current = new TTSPlayer(apiBase);
 
         return () => {
@@ -184,7 +187,8 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
         player.onComplete = () => {
             if (voiceModeRef.current) {
                 setVoiceState(STATES.LISTENING);
-                startListening();
+                // On iOS we keep the recognizer running (keepListeningOnFinal), so don't restart
+                if (!isIOS) startListening();
             }
         };
         player.onStateChange = (state) => {
@@ -197,7 +201,7 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
             console.error('[TTS] Sarvam TTS error:', err);
             if (voiceModeRef.current) {
                 setVoiceState(STATES.LISTENING);
-                startListening();
+                if (!isIOS) startListening();
             }
         });
     }, [startListening]);
@@ -217,33 +221,34 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
             if (streamCancelRef.current) { streamCancelRef.current(); streamCancelRef.current = null; }
         } else {
             // === TURN ON ===
-            // Pre-check mic permission
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                stream.getTracks().forEach(t => t.stop());
-            } catch (err) {
-                if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-                    setVoiceTranscript('⚠️ Microphone blocked — enable in browser settings');
-                } else if (err.name === 'NotFoundError') {
-                    setVoiceTranscript('⚠️ No microphone found');
-                } else {
-                    setVoiceTranscript('⚠️ Mic error: ' + (err.message || err.name));
-                }
-                setTimeout(() => setVoiceTranscript(''), 4000);
-                return;
-            }
-
+            // iOS Safari: SpeechRecognition.start() must run in the same sync turn as the user tap.
+            // Do NOT await getUserMedia before startListening() or iOS will block recognition.
             voiceModeRef.current = true;
             setVoiceMode(true);
             setVoiceState(STATES.LISTENING);
 
-            // Start listening immediately (no waiting)
+            // Start recognition synchronously (required on iOS)
             startListening();
 
-            const greet = languageRef.current === 'ta'
-                ? "வணக்கம்! நீங்கள் என்ன சாப்பிட விரும்புகிறீர்கள்?"
-                : "Hello! What would you like to eat?";
-            speak(greet);
+            // Request mic permission and play greeting after (no await before startListening)
+            navigator.mediaDevices.getUserMedia({ audio: true })
+                .then((stream) => {
+                    stream.getTracks().forEach(t => t.stop());
+                    const greet = languageRef.current === 'ta'
+                        ? "வணக்கம்! நீங்கள் என்ன சாப்பிட விரும்புகிறீர்கள்?"
+                        : "Hello! What would you like to eat?";
+                    speak(greet);
+                })
+                .catch((err) => {
+                    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                        setVoiceTranscript('⚠️ Microphone blocked — enable in browser settings');
+                    } else if (err.name === 'NotFoundError') {
+                        setVoiceTranscript('⚠️ No microphone found');
+                    } else {
+                        setVoiceTranscript('⚠️ Mic error: ' + (err.message || err.name));
+                    }
+                    setTimeout(() => setVoiceTranscript(''), 4000);
+                });
         }
     }, [voiceMode, startListening, speak]);
 

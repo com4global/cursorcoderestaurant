@@ -50,22 +50,30 @@ def _build_cart_summary_chat(db: Session, user_id: int) -> dict:
         items = []
         for oi in order.items:
             mi = db.query(MenuItem).filter(MenuItem.id == oi.menu_item_id).first()
-            line_total = oi.price_cents * oi.quantity
+            price_cents = oi.price_cents or 0
+            # Fix likely double-converted price (e.g. 129900 instead of 1299)
+            if price_cents >= 10000 and price_cents % 100 == 0:
+                candidate = price_cents // 100
+                if 1 <= candidate <= 10000:
+                    price_cents = candidate
+            line_total = price_cents * oi.quantity
             items.append({
+                "order_item_id": oi.id,
                 "name": mi.name if mi else f"Item #{oi.menu_item_id}",
                 "quantity": oi.quantity,
-                "price_cents": oi.price_cents,
+                "price_cents": price_cents,
                 "line_total_cents": line_total,
             })
         if items:
+            subtotal = sum(i["line_total_cents"] for i in items)
             groups.append({
                 "restaurant_id": order.restaurant_id,
                 "restaurant_name": restaurant.name if restaurant else "Unknown",
                 "order_id": order.id,
                 "items": items,
-                "subtotal_cents": order.total_cents,
+                "subtotal_cents": subtotal,
             })
-            grand_total += order.total_cents
+            grand_total += subtotal
     return {"restaurants": groups, "grand_total_cents": grand_total}
 
 
@@ -191,6 +199,47 @@ def _extract_item_after_restaurant(text: str) -> str | None:
     return None
 
 
+def _parse_multi_restaurant_order(cleaned: str, lower: str, all_restaurants: list, db: Session, user_id: int) -> list | None:
+    """
+    Parse "2 chicken biryani from Aroma and 1 chicken lollipop from Desi District".
+    Returns list of (restaurant, [(menu_item, qty), ...]) or None if not matched.
+    """
+    # Split by " and " or ", and " (with optional spaces)
+    parts = re.split(r"\s+and\s+|\s*,\s*and\s*", lower)
+    if len(parts) < 2:
+        return None
+    prefix_strip = r"^(?:i\s+would\s+like\s+to\s+|i\s+want\s+to\s+|please\s+)?(?:order|get|add)\s+"
+    segments = []
+    for part in parts:
+        part = re.sub(prefix_strip, "", part.strip()).strip()
+        if not part:
+            continue
+        # "2 chicken biryani from aroma" or "chicken lollipop from desi district"
+        m = re.search(r"^(?:(\d+)\s+)?(.+?)\s+from\s+(.+)$", part)
+        if not m:
+            return None
+        qty_str, item_phrase, rest_phrase = m.group(1), m.group(2).strip(), m.group(3).strip()
+        qty = int(qty_str) if qty_str else 1
+        restaurant = _find_best_restaurant(rest_phrase, all_restaurants)
+        if not restaurant:
+            return None
+        all_items = _get_all_restaurant_items(db, restaurant.id)
+        parsed = _parse_order_items(item_phrase, all_items)
+        if not parsed:
+            single = _find_best_item(item_phrase, all_items)
+            if single:
+                parsed = [(single, qty)]
+            else:
+                return None
+        else:
+            parsed = [(parsed[0][0], qty)]
+        segments.append((restaurant, parsed))
+
+    if not segments:
+        return None
+    return segments
+
+
 def _find_best_restaurant(name: str, all_restaurants) -> object | None:
     """Fuzzy match a restaurant name."""
     name_lower = name.lower().strip()
@@ -301,6 +350,32 @@ def _search_items_across_restaurants(db: Session, query: str, restaurants, limit
                 results.append((item, rest, score))
 
     # Sort by match score DESC, then price ASC (cheapest first)
+    results.sort(key=lambda x: (-x[2], x[0].price_cents))
+    return results[:limit]
+
+
+def _search_items_across_restaurants_relaxed(db: Session, query: str, restaurants, limit=8, min_keywords=1):
+    """Like _search_items_across_restaurants but require only min_keywords to match (for 'cheap biryani', 'best combos')."""
+    raw_keywords = query.lower().strip().split()
+    keywords = [kw for kw in raw_keywords if kw not in _CHAT_STOP_WORDS and len(kw) >= 2]
+    if not keywords:
+        keywords = sorted(raw_keywords, key=len, reverse=True)[:2]
+    if not keywords:
+        return []
+
+    results = []
+    for rest in restaurants:
+        all_items = _get_all_restaurant_items(db, rest.id)
+        for item in all_items:
+            if item.price_cents <= 0:
+                continue
+            item_name_lower = item.name.lower()
+            matched = sum(1 for kw in keywords if _fuzzy_match_chat(kw, item_name_lower))
+            if matched >= min(min_keywords, len(keywords)):
+                exact_bonus = sum(1 for kw in keywords if kw in item_name_lower)
+                score = matched + exact_bonus
+                results.append((item, rest, score))
+
     results.sort(key=lambda x: (-x[2], x[0].price_cents))
     return results[:limit]
 
@@ -833,6 +908,30 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
     if session.restaurant_id is None:
         all_restaurants = crud.list_restaurants(db)
 
+        # Multi-restaurant order: "2 chicken biryani from Aroma and 1 chicken lollipop from Desi District"
+        multi = _parse_multi_restaurant_order(cleaned, lower, all_restaurants, db, session.user_id)
+        if multi:
+            lines = []
+            for rest, item_list in multi:
+                order = crud.get_user_order_for_restaurant(db, session.user_id, rest.id)
+                if not order:
+                    order = crud.create_order(db, session.user_id, rest.id)
+                for menu_item, qty in item_list:
+                    crud.add_order_item(db, order, menu_item, qty)
+                crud.recompute_order_total(db, order)
+                for menu_item, qty in item_list:
+                    lines.append(f"  **{rest.name}:** {qty}x {menu_item.name} — ${menu_item.price_cents * qty / 100:.2f}")
+            cart = _build_cart_summary_chat(db, session.user_id)
+            reply = "Added to your orders:\n\n" + "\n".join(lines)
+            reply += "\n\nYou have items from multiple restaurants. Go to Cart to review or add more from each."
+            rest_names = ", ".join(r.name for r, _ in multi)
+            return _result(
+                reply,
+                restaurant_id=None,
+                cart_summary=cart,
+                voice_prompt=f"Added to {rest_names}. You can add more from each restaurant or go to cart.",
+            )
+
         extracted_name = _extract_restaurant_name(cleaned)
         item_hint = _extract_item_after_restaurant(cleaned) if extracted_name else None
 
@@ -906,9 +1005,11 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                 voice_prompt=f"Welcome to {restaurant.name}. We have: {cat_list}. Which category would you like?",
             )
 
-        # No restaurant match — try cross-restaurant item search
+        # No restaurant match — try cross-restaurant item search (e.g. "spicy biryani", "cheap biryani", "best combos")
         if all_restaurants and len(cleaned) > 2:
             cross_results = _search_items_across_restaurants(db, cleaned, all_restaurants)
+            if not cross_results:
+                cross_results = _search_items_across_restaurants_relaxed(db, cleaned, all_restaurants, limit=8, min_keywords=1)
             if cross_results:
                 # Extract meaningful keywords for display
                 raw_kws = cleaned.lower().split()

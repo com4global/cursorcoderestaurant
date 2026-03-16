@@ -111,7 +111,41 @@ const CARD_GRADIENTS = [
   ['#0a192f', '#64ffda'],
 ];
 
-// Smart restaurant → image mapping
+// All food images — used for unique-by-name fallback so every restaurant/item gets a distinct image
+const FOOD_IMAGE_POOL = [
+  '/food-images/food_indian_thali.png',
+  '/food-images/food_indian_grocery.png',
+  '/food-images/food_bbq_platter.png',
+  '/food-images/food_thai_spread.png',
+  '/food-images/food_pizza_fresh.png',
+  '/food-images/food_italian_aroma.png',
+  '/food-images/food_biryani.png',
+  '/food-images/food_snacks_plate.png',
+  '/food-images/food_curry_bowl.png',
+  '/food-images/food_naan_bread.png',
+  '/food-images/food_desserts_indian.png',
+  '/food-images/food_drinks_lassi.png',
+  '/food-images/food_falooda.png',
+  '/food-images/food_frankie_wrap.png',
+  '/food-images/food_tiffin_breakfast.png',
+  '/food-images/food_indo_chinese.png',
+  '/food-images/food_chaat_street.png',
+  '/food-images/food_burger_desi.png',
+  '/food-images/food_combo_meal.png',
+];
+
+// Deterministic hash from string → index into FOOD_IMAGE_POOL (unique per name)
+function hashForImage(str) {
+  let h = 0;
+  const s = String(str || '').toLowerCase();
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) - h) + s.charCodeAt(i);
+    h = h & h;
+  }
+  return Math.abs(h);
+}
+
+// Smart restaurant → image mapping (semantic match first, then unique-by-name from pool)
 const RESTAURANT_IMAGE_MAP = [
   [/desi|district|indian/i, '/food-images/food_indian_thali.png'],
   [/triveni|supermarket|grocery/i, '/food-images/food_indian_grocery.png'],
@@ -126,7 +160,7 @@ function getRestaurantImage(name = '') {
   for (const [regex, img] of RESTAURANT_IMAGE_MAP) {
     if (regex.test(text)) return img;
   }
-  return null; // falls back to gradient
+  return FOOD_IMAGE_POOL[hashForImage(name) % FOOD_IMAGE_POOL.length];
 }
 
 // Smart food item/category → image mapping
@@ -152,12 +186,15 @@ const FOOD_IMAGE_MAP = [
   [/new|categor|misc|other/i, '/food-images/food_indian_thali.png'],
 ];
 
-function getFoodItemImage(name = '', category = '') {
-  const text = `${name} ${category}`.toLowerCase();
+// Match by item name only so items in the same category (e.g. Appetizers) don't all get the same image.
+// Pass optional id so each menu item gets a unique image when no regex matches.
+function getFoodItemImage(name = '', category = '', itemId = null) {
+  const nameLower = String(name || '').toLowerCase();
   for (const [regex, img] of FOOD_IMAGE_MAP) {
-    if (regex.test(text)) return img;
+    if (regex.test(nameLower)) return img;
   }
-  return null; // falls back to emoji
+  const seed = itemId != null ? `${name}\0${itemId}` : `${name}\0${category}`;
+  return FOOD_IMAGE_POOL[hashForImage(seed) % FOOD_IMAGE_POOL.length];
 }
 
 const welcomeMsg = {
@@ -989,21 +1026,9 @@ export default function App() {
       } catch (err) { /* fall through to normal chat */ }
     }
 
-    // Guard: if no restaurant is selected, don't send freeform text to process_message
-    // (backend session may retain a stale restaurant_id from a previous interaction)
-    // BUT: allow #slug (restaurant selection), category:, add: commands through
-    //      because setSelectedRestaurant is async and hasn't updated yet when doSend runs
-    const trimmedForGuard = (fromVoice ? cleanedText : text.trim());
-    if (!selectedRestaurant && !trimmedForGuard.startsWith('#') && !trimmedForGuard.startsWith('category:') && !trimmedForGuard.startsWith('add:') && trimmedForGuard !== 'show menu') {
-      trace('guard.noRestaurant', { trimmedForGuard });
-      const msg = "Please pick a restaurant first! Go to the Home tab or type # to search.";
-      setMessages((p) => [...p, { role: "bot", content: msg }]);
-      setStatus("Ready.");
-      if (fromVoice && voiceModeRef.current) {
-        voiceSpeakRef.current("Please pick a restaurant first.", true);
-      }
-      return;
-    }
+    // When no restaurant is selected, still send to backend: it can handle
+    // "I want spicy biryani", "cheap biryani", "2 biryani from Aroma and 1 lollipop from Desi", etc.
+    // Backend will return cross-restaurant results or set restaurant from message.
 
     try {
       const textToSend = fromVoice ? cleanedText : text.trim();
@@ -1505,8 +1530,8 @@ export default function App() {
                       <motion.div key={`nearby-${i}`} className="nearby-item"
                         initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }}
                         transition={{ delay: i * 0.05 }}>
-                        <div className="nearby-item-img" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.5rem' }}>
-                          {getFoodEmoji(p.name, p.cuisine || "")}
+                        <div className="nearby-item-img" style={{ overflow: 'hidden', borderRadius: 'inherit' }}>
+                          <img src={FOOD_IMAGE_POOL[hashForImage(p.name + (p.cuisine || '')) % FOOD_IMAGE_POOL.length]} alt={p.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                         </div>
                         <div className="nearby-item-info">
                           <div className="nearby-item-name">{p.name}</div>
@@ -1591,7 +1616,7 @@ export default function App() {
                         transition={{ delay: ii * 0.04 }}>
                         <div className="menu-item-img">
                           {(() => {
-                            const itemImg = getFoodItemImage(item.name, activeCategoryName || '');
+                            const itemImg = getFoodItemImage(item.name, activeCategoryName || '', item.id);
                             return itemImg ? (
                               <img src={itemImg} alt={item.name} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'inherit' }} />
                             ) : getFoodEmoji(item.name);
@@ -2496,8 +2521,13 @@ export default function App() {
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <span>${(item.line_total_cents / 100).toFixed(2)}</span>
                         <button className="cart-item-delete" onClick={async () => {
+                          const id = item.order_item_id;
+                          if (id == null || id === undefined) {
+                            try { const c = await fetchCart(token); setCartData(c); } catch { }
+                            return;
+                          }
                           try {
-                            const c = await removeCartItem(token, item.order_item_id);
+                            const c = await removeCartItem(token, id);
                             setCartData(c);
                             if (!c.restaurants || c.restaurants.length === 0) setShowCartPanel(false);
                           } catch { }

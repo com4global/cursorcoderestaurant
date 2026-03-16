@@ -100,7 +100,7 @@ class OrderItem(Base):
 
     id = Column(Integer, primary_key=True)
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
-    menu_item_id = Column(Integer, ForeignKey("menu_items.id"), nullable=False)
+    menu_item_id = Column(Integer, ForeignKey("menu_items.id"), nullable=True)  # nullable so menu can be replaced; order keeps quantity/price
     quantity = Column(Integer, nullable=False)
     price_cents = Column(Integer, nullable=False)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json as _json
 import os
+from typing import Optional
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -106,6 +107,24 @@ def _ensure_taste_profiles_columns():
             raise
 
 
+def _ensure_order_items_menu_item_nullable():
+    """Allow order_items.menu_item_id to be NULL so menu can be replaced without breaking order history (FK)."""
+    from sqlalchemy import text
+    if "sqlite" in settings.database_url:
+        return  # SQLite: NOT NULL can't be dropped without table recreate; new DBs get nullable from model
+    with engine.connect() as conn:
+        try:
+            conn.execute(text("ALTER TABLE order_items ALTER COLUMN menu_item_id DROP NOT NULL"))
+            conn.commit()
+        except Exception as e:
+            msg = str(e).lower()
+            if "does not exist" in msg or "already" in msg or "cannot drop" in msg:
+                conn.rollback()
+                return
+            conn.rollback()
+            raise
+
+
 try:
     _ensure_chat_sessions_columns()
 except Exception as e:
@@ -118,6 +137,10 @@ try:
     _ensure_taste_profiles_columns()
 except Exception as e:
     print(f"[startup] taste_profiles columns check skipped: {e}")
+try:
+    _ensure_order_items_menu_item_nullable()
+except Exception as e:
+    print(f"[startup] order_items menu_item_id nullable check skipped: {e}")
 
 app = FastAPI(title="RestarentAI")
 app.include_router(voice_router)
@@ -184,7 +207,7 @@ def meal_optimizer(
 
 # --- Multi-restaurant cart helper ---
 def _build_cart_summary(db: Session, user_id: int) -> dict:
-    """Build grouped cart data across all pending orders for a user."""
+    """Build grouped cart data across all pending orders for a user. Totals are always computed from item line totals (never trust order.total_cents for display)."""
     try:
         pending_orders = crud.get_user_pending_orders(db, user_id)
     except Exception:
@@ -199,6 +222,11 @@ def _build_cart_summary(db: Session, user_id: int) -> dict:
                 mi = db.query(models.MenuItem).filter(models.MenuItem.id == oi.menu_item_id).first()
                 price_cents = getattr(oi, "price_cents", 0) or 0
                 quantity = getattr(oi, "quantity", 0) or 0
+                # Fix likely double-converted price (e.g. 129900 instead of 1299): if value is 100x a reasonable price, use /100
+                if price_cents >= 10000 and price_cents % 100 == 0:
+                    candidate = price_cents // 100
+                    if 1 <= candidate <= 10000:  # $0.01 to $100 per item
+                        price_cents = candidate
                 line_total = price_cents * quantity
                 items.append({
                     "order_item_id": oi.id,
@@ -207,9 +235,8 @@ def _build_cart_summary(db: Session, user_id: int) -> dict:
                     "price_cents": price_cents,
                     "line_total_cents": line_total,
                 })
-            subtotal = getattr(order, "total_cents", None)
-            if subtotal is None:
-                subtotal = sum(i["line_total_cents"] for i in items)
+            # Always compute subtotal from items so cart total is correct even if order.total_cents is stale/wrong
+            subtotal = sum(i["line_total_cents"] for i in items)
             if items:
                 groups.append({
                     "restaurant_id": order.restaurant_id,
@@ -2554,6 +2581,78 @@ async def extract_menu_from_file(
     return menu_data
 
 
+def _normalize_menu_import_url(url: str) -> str:
+    """Ensure URL has a scheme so Playwright/fetch work (e.g. anjapparindian.com/menu/... -> https://...)."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if not parsed.scheme:
+        return ("https:" + url) if url.startswith("//") else ("https://" + url)
+    return url
+
+
+def _fallback_extract_menu_from_text(raw_text: str) -> Optional[dict]:
+    """When AI fails, extract menu items from text using price patterns. Handles same-line and price-on-next-line."""
+    import re
+    # Price: $12.99, 12.99, Rs.199, or just digits with 2 decimal places
+    price_only_re = re.compile(r"^\s*(?:\$|Rs\.?|₹|€)?\s*(\d+(?:\.\d{1,2})?)\s*$")
+    price_anywhere_re = re.compile(r"(?:\$|Rs\.?|₹|€)?\s*(\d+(?:\.\d{1,2})?)(?=\s|$|,)")
+    noise = {"menu", "home", "checkout", "cart", "order", "sign in", "login", "search", "add to cart", "view cart"}
+    items = []
+    seen = set()
+    lines = [ln.strip() for ln in raw_text.split("\n") if ln.strip()]
+
+    for i, line in enumerate(lines):
+        if len(line) > 300:
+            continue
+        # Case 1: Line is only a price (e.g. "14.99" or "$12.99") — use previous line as name
+        only_price = price_only_re.match(line)
+        if only_price:
+            price_val = float(only_price.group(1))
+            price_cents = int(round(price_val * 100))
+            if price_cents <= 0 or price_cents > 100000:
+                continue
+            name_part = (lines[i - 1].strip() if i > 0 else "").strip().rstrip(".- ,")
+            if not name_part or len(name_part) < 2:
+                continue
+            lower = name_part.lower()
+            if lower in noise or any(lower.startswith(n) for n in ("subtotal", "total", "tax", "delivery")):
+                continue
+            key = name_part.upper()[:80]
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({"name": name_part[:120], "description": "", "price_cents": price_cents})
+            continue
+
+        # Case 2: Price somewhere in the line — find last price match (most likely the item price)
+        matches = list(price_anywhere_re.finditer(line))
+        if not matches:
+            continue
+        last_match = matches[-1]
+        price_val = float(last_match.group(1))
+        price_cents = int(round(price_val * 100))
+        if price_cents <= 0 or price_cents > 100000:
+            continue
+        name_part = line[: last_match.start()].strip().rstrip(".- ,")
+        if not name_part or len(name_part) < 2:
+            continue
+        lower = name_part.lower()
+        if lower in noise or any(lower.startswith(n) for n in ("subtotal", "total", "tax", "delivery")):
+            continue
+        key = name_part.upper()[:80]
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append({"name": name_part[:120], "description": "", "price_cents": price_cents})
+
+    if not items:
+        return None
+    return {
+        "restaurant_name": "Extracted",
+        "categories": [{"name": "Menu", "items": items}],
+    }
+
+
 @app.post("/owner/import-menu")
 def import_menu_from_url(
     payload: dict,
@@ -2567,6 +2666,7 @@ def import_menu_from_url(
     url = payload.get("url", "").strip()
     if not url:
         raise HTTPException(status_code=400, detail="URL is required")
+    url = _normalize_menu_import_url(url)
 
     from urllib.parse import urljoin, urlparse
     import re
@@ -2929,6 +3029,29 @@ def import_menu_from_url(
     # Limit total content for the LLM
     content = content[:40000]
 
+    def _parse_menu_json(raw_text):
+        """Parse menu JSON from LLM output; handle ```json wrapping and stray text."""
+        if not raw_text or not isinstance(raw_text, str):
+            return None
+        t = raw_text.strip()
+        if t.startswith("```"):
+            parts = t.split("```", 2)
+            if len(parts) >= 2:
+                t = parts[1]
+                if t.lower().startswith("json"):
+                    t = t[4:].lstrip()
+        start = t.find("{")
+        end = t.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return _json.loads(t[start : end + 1])
+            except Exception:
+                pass
+        try:
+            return _json.loads(t)
+        except Exception:
+            return None
+
     menu_prompt = f"""Extract the restaurant menu from the following website data.
 
 The data comes from {pages_scraped} page(s) of the same restaurant website.
@@ -2994,7 +3117,7 @@ Website data:
             oai_res = urllib.request.urlopen(oai_req, timeout=120)
             oai_data = _json.loads(oai_res.read())
             response_text = oai_data["choices"][0]["message"]["content"].strip()
-            menu_data = _json.loads(response_text)
+            menu_data = _parse_menu_json(response_text)
         except Exception as e:
             print(f"[AI] OpenAI extraction error: {e}")
             menu_data = None
@@ -3086,12 +3209,12 @@ RULES:
         except Exception as e:
             print(f"[AI] Gemini Vision error: {e}")
 
-        # --- 6B: Gemini text fallback (if still low items) ---
-        if total_items < 10:
+        # --- 6B: Gemini text (when no menu yet or still low items) ---
+        if menu_data is None or total_items < 10:
             try:
                 text_prompt = f"""{gemini_extraction_prompt}
 
-Website text content:
+Website text content (from {pages_scraped} page(s)):
 {content[:30000]}"""
 
                 text_body = _json.dumps({
@@ -3109,13 +3232,21 @@ Website text content:
                 text_data = _json.loads(text_res.read())
                 text_text = text_data["candidates"][0]["content"]["parts"][0]["text"].strip()
                 text_menu = _parse_gemini_json(text_text)
-
-                text_items = sum(len(c.get("items", [])) for c in text_menu.get("categories", []))
-                if text_items > total_items:
-                    menu_data = text_menu
-                    total_items = text_items
+                if text_menu and isinstance(text_menu.get("categories"), list):
+                    text_items = sum(len(c.get("items", [])) for c in text_menu.get("categories", []))
+                    if text_items > total_items:
+                        menu_data = text_menu
+                        total_items = text_items
             except Exception as e:
                 print(f"[AI] Gemini text error: {e}")
+
+    # --- Fallback: regex-based extraction when AI returned nothing ---
+    if not menu_data:
+        raw_text = "\n".join(all_pages.values())
+        fallback = _fallback_extract_menu_from_text(raw_text)
+        if fallback and fallback.get("categories"):
+            menu_data = fallback
+            print(f"[MenuExtract] Used regex fallback: {sum(len(c.get('items', [])) for c in menu_data['categories'])} items")
 
     if not menu_data:
         return {"error": f"Could not extract menu from {pages_scraped} page(s). Try a direct menu page URL."}
@@ -3231,9 +3362,48 @@ Website text content:
     # Recount
     total_items = sum(len(c.get("items", [])) for c in menu_data.get("categories", []))
     if menu_data.get("error") or total_items == 0:
-        return {"error": f"No menu items found across {pages_scraped} page(s). Try a direct menu page URL or a food delivery page (DoorDash, UberEats, Grubhub)."}
+        # AI returned nothing useful — try regex fallback on raw text and on cleaned content
+        raw_text = "\n".join(all_pages.values())
+        fallback = _fallback_extract_menu_from_text(raw_text)
+        fallback_from_content = _fallback_extract_menu_from_text(content) if content else None
+        # Use whichever has more items
+        n_raw = sum(len(c.get("items", [])) for c in fallback["categories"]) if fallback and fallback.get("categories") else 0
+        n_content = sum(len(c.get("items", [])) for c in fallback_from_content["categories"]) if fallback_from_content and fallback_from_content.get("categories") else 0
+        if n_content > n_raw:
+            fallback = fallback_from_content
+        if fallback and fallback.get("categories"):
+            fallback_items = sum(len(c.get("items", [])) for c in fallback["categories"])
+            if fallback_items > 0:
+                menu_data = fallback
+                menu_data["pages_scraped"] = pages_scraped
+                print(f"[MenuExtract] AI returned 0 items; used regex fallback: {fallback_items} items")
+            else:
+                return {"error": f"No menu items found across {pages_scraped} page(s). Try a direct menu page URL or a food delivery page (DoorDash, UberEats, Grubhub)."}
+        else:
+            return {"error": f"No menu items found across {pages_scraped} page(s). Try a direct menu page URL or a food delivery page (DoorDash, UberEats, Grubhub)."}
 
     return menu_data
+
+
+def _norm_import_price_cents(item_data: dict) -> int:
+    """Get price_cents from payload; accept price (dollars) or price_cents (cents). Coerce to int. Avoid double conversion."""
+    pc = item_data.get("price_cents")
+    if pc is not None and pc != "":
+        try:
+            return int(round(float(pc)))
+        except (TypeError, ValueError):
+            pass
+    price = item_data.get("price")
+    if price is not None and price != "":
+        try:
+            p = float(price)
+            # If value looks like cents (whole number >= 1000, e.g. 1299), don't multiply by 100
+            if p >= 1000 and p == round(p):
+                return int(round(p))
+            return int(round(p * 100))
+        except (TypeError, ValueError):
+            pass
+    return 0
 
 
 @app.post("/owner/restaurants/{restaurant_id}/import-menu")
@@ -3251,49 +3421,86 @@ def save_imported_menu(
     if not r:
         raise HTTPException(status_code=404, detail="Restaurant not found")
 
-    categories = payload.get("categories", [])
+    categories = payload.get("categories") or []
+    if not isinstance(categories, list):
+        raise HTTPException(status_code=400, detail="categories must be a list")
     created = {"categories": 0, "items": 0}
 
-    # Clear existing categories and items for this restaurant to prevent duplicates
-    existing_cats = db.query(models.MenuCategory).filter(
-        models.MenuCategory.restaurant_id == restaurant_id
-    ).all()
-    if existing_cats:
-        existing_cat_ids = [c.id for c in existing_cats]
-        # Nullify FK references in chat_sessions
-        db.query(models.ChatSession).filter(
-            models.ChatSession.category_id.in_(existing_cat_ids)
-        ).update({models.ChatSession.category_id: None}, synchronize_session=False)
-        # Delete old items
-        db.query(models.MenuItem).filter(
-            models.MenuItem.category_id.in_(existing_cat_ids)
-        ).delete(synchronize_session=False)
-        # Delete old categories
-        db.query(models.MenuCategory).filter(
-            models.MenuCategory.id.in_(existing_cat_ids)
-        ).delete(synchronize_session=False)
-        db.flush()
+    # Trace: log payload shape for debugging
+    n_cats = len(categories)
+    n_items = sum(len((c.get("items") or [])) for c in categories if isinstance(c, dict))
+    print(f"[SaveImportedMenu] restaurant_id={restaurant_id} categories={n_cats} items={n_items}")
 
-    for i, cat_data in enumerate(categories):
-        cat = models.MenuCategory(
-            restaurant_id=restaurant_id,
-            name=cat_data.get("name", f"Category {i+1}"),
-            sort_order=i + 1,
-        )
-        db.add(cat)
-        db.flush()
-        created["categories"] += 1
+    try:
+        # Clear existing categories and items for this restaurant to prevent duplicates
+        existing_cats = db.query(models.MenuCategory).filter(
+            models.MenuCategory.restaurant_id == restaurant_id
+        ).all()
+        if existing_cats:
+            existing_cat_ids = [c.id for c in existing_cats]
+            try:
+                db.query(models.ChatSession).filter(
+                    models.ChatSession.category_id.in_(existing_cat_ids)
+                ).update({models.ChatSession.category_id: None}, synchronize_session=False)
+            except Exception:
+                pass  # column may not exist in older DBs
+            # Unlink order_items from menu_items we're about to delete (preserves order history, avoids FK violation)
+            menu_ids_to_remove = [r[0] for r in db.query(models.MenuItem.id).filter(
+                models.MenuItem.category_id.in_(existing_cat_ids)
+            ).all()]
+            if menu_ids_to_remove:
+                db.query(models.OrderItem).filter(
+                    models.OrderItem.menu_item_id.in_(menu_ids_to_remove)
+                ).update({models.OrderItem.menu_item_id: None}, synchronize_session=False)
+            db.query(models.MenuItem).filter(
+                models.MenuItem.category_id.in_(existing_cat_ids)
+            ).delete(synchronize_session=False)
+            db.query(models.MenuCategory).filter(
+                models.MenuCategory.id.in_(existing_cat_ids)
+            ).delete(synchronize_session=False)
+            db.flush()
 
-        for item_data in cat_data.get("items", []):
-            item = models.MenuItem(
-                category_id=cat.id,
-                name=item_data.get("name", "Unknown"),
-                description=item_data.get("description", ""),
-                price_cents=item_data.get("price_cents", 0),
-                is_available=True,
+        for i, cat_data in enumerate(categories):
+            if not isinstance(cat_data, dict):
+                continue
+            cat_name = str(cat_data.get("name") or f"Category {i+1}")[:120].strip() or f"Category {i+1}"
+            cat = models.MenuCategory(
+                restaurant_id=restaurant_id,
+                name=cat_name,
+                sort_order=i + 1,
             )
-            db.add(item)
-            created["items"] += 1
+            db.add(cat)
+            db.flush()
+            created["categories"] += 1
 
-    db.commit()
-    return {"ok": True, "created": created}
+            for item_data in (cat_data.get("items") or []):
+                if not isinstance(item_data, dict):
+                    continue
+                raw_name = item_data.get("name")
+                name = (str(raw_name) if raw_name is not None else "Unknown").strip()[:160] or "Unknown"
+                raw_desc = item_data.get("description")
+                desc = None
+                if raw_desc is not None and str(raw_desc).strip():
+                    desc = str(raw_desc)[:2000].strip() or None
+                price_cents = max(0, int(_norm_import_price_cents(item_data)))
+                item = models.MenuItem(
+                    category_id=cat.id,
+                    name=name,
+                    description=desc,
+                    price_cents=price_cents,
+                    is_available=True,
+                )
+                db.add(item)
+                created["items"] += 1
+
+        db.commit()
+        return {"ok": True, "created": created}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        import traceback
+        traceback.print_exc()
+        print(f"[SaveImportedMenu] Error: {e}")
+        err_msg = str(e)
+        raise HTTPException(status_code=500, detail=f"Failed to save menu: {err_msg}")

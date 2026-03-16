@@ -205,3 +205,132 @@ class TestGroupOrderIntent:
         assert resp.status_code == 200
         data = resp.json()
         assert data.get("open_group_tab") is not True
+
+
+class TestNoRestaurantFoodSearch:
+    """User on Chat with no restaurant selected: food queries return cross-restaurant results or options."""
+
+    def test_spicy_biryani_returns_found_at_restaurants_or_options(self, client):
+        token = _user_token(client, "norest_biryani@test.com")
+        owner_token = _owner_token(client, "norest_biryani_owner@test.com")
+        r = create_test_restaurant(client, owner_token, "Biryani House")
+        cat = create_test_category(client, owner_token, r.json()["id"], "Mains")
+        create_test_item(client, owner_token, cat.json()["id"], "Spicy Chicken Biryani", 1299)
+
+        resp = client.post(
+            "/chat/message",
+            json={"text": "I want some spicy biryani with best value", "session_id": None},
+            headers=get_auth_header(token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        reply = data["reply"]
+        # Should get cross-restaurant result or "Found" listing, not "pick a restaurant first"
+        assert "Found" in reply or "Biryani" in reply or "biryani" in reply or "restaurant" in reply.lower()
+        assert "pick a restaurant first" not in reply
+
+    def test_cheap_biryani_returns_results_or_restaurant_list(self, client):
+        token = _user_token(client, "norest_cheap@test.com")
+        owner_token = _owner_token(client, "norest_cheap_owner@test.com")
+        r = create_test_restaurant(client, owner_token, "Value Kitchen")
+        cat = create_test_category(client, owner_token, r.json()["id"], "Mains")
+        create_test_item(client, owner_token, cat.json()["id"], "Chicken Biryani", 899)
+
+        resp = client.post(
+            "/chat/message",
+            json={"text": "cheap biryani", "session_id": None},
+            headers=get_auth_header(token),
+        )
+        assert resp.status_code == 200
+        reply = resp.json()["reply"]
+        assert "Found" in reply or "Biryani" in reply or "biryani" in reply or "restaurant" in reply.lower() or "Available" in reply
+
+    def test_best_combos_relaxed_search_returns_something(self, client):
+        token = _user_token(client, "norest_combos@test.com")
+        owner_token = _owner_token(client, "norest_combos_owner@test.com")
+        r = create_test_restaurant(client, owner_token, "Combo Place")
+        cat = create_test_category(client, owner_token, r.json()["id"], "Combos")
+        create_test_item(client, owner_token, cat.json()["id"], "Family Combo", 1999)
+
+        resp = client.post(
+            "/chat/message",
+            json={"text": "give me options like best combos", "session_id": None},
+            headers=get_auth_header(token),
+        )
+        assert resp.status_code == 200
+        reply = resp.json()["reply"]
+        # Relaxed search or fallback: should not be "couldn't find that restaurant" without listing options
+        assert "Combo" in reply or "combo" in reply or "restaurant" in reply.lower() or "Available" in reply or "options" in reply.lower()
+
+
+class TestMultiRestaurantOrder:
+    """User orders from multiple restaurants in one message: '2 X from A and 1 Y from B'."""
+
+    def test_two_restaurants_one_message_adds_to_both_orders(self, client):
+        token = _user_token(client, "multi_order@test.com")
+        owner_token = _owner_token(client, "multi_order_owner@test.com")
+
+        r1 = create_test_restaurant(client, owner_token, "Aroma")
+        assert r1.status_code == 200
+        aroma_id = r1.json()["id"]
+        cat1 = create_test_category(client, owner_token, aroma_id, "Mains")
+        create_test_item(client, owner_token, cat1.json()["id"], "Chicken Biryani", 1299)
+
+        r2 = create_test_restaurant(client, owner_token, "Desi District")
+        assert r2.status_code == 200
+        desi_id = r2.json()["id"]
+        cat2 = create_test_category(client, owner_token, desi_id, "Starters")
+        create_test_item(client, owner_token, cat2.json()["id"], "Chicken Lollipop", 699)
+
+        resp = client.post(
+            "/chat/message",
+            json={
+                "text": "I would like to order 2 chicken biryani from Aroma and 1 chicken lollipop from Desi District",
+                "session_id": None,
+            },
+            headers=get_auth_header(token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        reply = data["reply"]
+        assert "Added to your orders" in reply
+        assert "Aroma" in reply
+        assert "Desi District" in reply
+        assert "Chicken Biryani" in reply or "biryani" in reply.lower()
+        assert "Chicken Lollipop" in reply or "lollipop" in reply.lower()
+        assert "2" in reply
+        assert "1" in reply
+
+        cart = client.get("/cart", headers=get_auth_header(token)).json()
+        assert cart["grand_total_cents"] > 0
+        groups = cart.get("restaurants", [])
+        restaurant_names = {g.get("restaurant_name") for g in groups if g.get("restaurant_name")}
+        assert len(groups) >= 2, "Cart should have orders from both Aroma and Desi District"
+        assert "Aroma" in restaurant_names
+        assert "Desi District" in restaurant_names
+
+    def test_multi_restaurant_reply_has_cart_summary(self, client):
+        token = _user_token(client, "multi_cart@test.com")
+        owner_token = _owner_token(client, "multi_cart_owner@test.com")
+
+        r1 = create_test_restaurant(client, owner_token, "Pizza Hub")
+        cat1 = create_test_category(client, owner_token, r1.json()["id"], "Pizza")
+        create_test_item(client, owner_token, cat1.json()["id"], "Margherita", 999)
+
+        r2 = create_test_restaurant(client, owner_token, "Burger Spot")
+        cat2 = create_test_category(client, owner_token, r2.json()["id"], "Burgers")
+        create_test_item(client, owner_token, cat2.json()["id"], "Cheese Burger", 599)
+
+        resp = client.post(
+            "/chat/message",
+            json={
+                "text": "1 margherita from Pizza Hub and 1 cheese burger from Burger Spot",
+                "session_id": None,
+            },
+            headers=get_auth_header(token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("cart_summary") is not None
+        assert "Added to your orders" in data["reply"] or "Pizza Hub" in data["reply"]
+        assert data["restaurant_id"] is None  # multi-restaurant keeps no single selection

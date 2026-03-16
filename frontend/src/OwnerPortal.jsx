@@ -51,6 +51,7 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
     const [importError, setImportError] = useState("");
     const [importRestId, setImportRestId] = useState(null);
     const [saveStatus, setSaveStatus] = useState("");
+    const [saveError, setSaveError] = useState("");
     const [extractMode, setExtractMode] = useState(null); // "url" | "image" | null
     const [dragActive, setDragActive] = useState(false);
 
@@ -343,12 +344,15 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
     async function handleSaveMenu() {
         if (!importedMenu || !importRestId) return;
         setSaveStatus("saving");
+        setSaveError("");
         try {
             await saveImportedMenu(token, importRestId, importedMenu);
             setSaveStatus("saved");
+            setSaveError("");
             loadProfile();
-        } catch {
+        } catch (err) {
             setSaveStatus("error");
+            setSaveError(err?.message || "Failed to save. Try again.");
         }
     }
 
@@ -804,7 +808,7 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                     <button className={`owner-tab-btn ${tab === "menu" ? "active" : ""}`} onClick={() => setTab(r.id, "menu")}>
                                         🍽️ Menu
                                     </button>
-                                    <button className={`owner-tab-btn ${tab === "extract" ? "active" : ""}`} onClick={() => { setTab(r.id, "extract"); setImportRestId(r.id); setExtractMode(null); setImportedMenu(null); setImportError(""); setSaveStatus(""); }}>
+                                    <button className={`owner-tab-btn ${tab === "extract" ? "active" : ""}`} onClick={() => { setTab(r.id, "extract"); setImportRestId(r.id); setExtractMode(null); setImportedMenu(null); setImportError(""); setSaveStatus(""); setSaveError(""); }}>
                                         🤖 Extract
                                     </button>
                                     <button className={`owner-tab-btn ${tab === "settings" ? "active" : ""}`} onClick={() => setTab(r.id, "settings")}>
@@ -1063,7 +1067,13 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                                     {importLoading ? "⏳ Scanning website..." : "🔍 Extract Menu from URL"}
                                                 </button>
                                                 {importLoading && (
-                                                    <div className="extract-progress-hint">This may take 30–60 seconds depending on the website.</div>
+                                                    <div className="extract-loading extract-loading-url">
+                                                        <div className="extract-spinner"></div>
+                                                        <div className="owner-progress-bar">
+                                                            <div className="owner-progress-fill"></div>
+                                                        </div>
+                                                        <p className="extract-progress-hint">Scanning pages & extracting menu… This may take 1–3 minutes (or up to 5 for large sites). Please don’t close the page.</p>
+                                                    </div>
                                                 )}
                                             </div>
                                         )}
@@ -1170,7 +1180,7 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                                 <div className="extract-preview-header">
                                                     <h4>✅ Extracted Menu — Review & Edit</h4>
                                                     <div style={{ display: 'flex', gap: 8 }}>
-                                                        <button className="extract-back-btn" onClick={() => { setImportedMenu(null); setExtractMode(null); setSaveStatus(""); }}>← New Extract</button>
+                                                        <button className="extract-back-btn" onClick={() => { setImportedMenu(null); setExtractMode(null); setSaveStatus(""); setSaveError(""); }}>← New Extract</button>
                                                     </div>
                                                 </div>
                                                 {importedMenu.restaurant_name && (
@@ -1217,7 +1227,7 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                                 >
                                                     {saveStatus === "saving" ? "⏳ Saving..." : saveStatus === "saved" ? "✅ Saved!" : "💾 Save to Menu"}
                                                 </button>
-                                                {saveStatus === "error" && <p className="extract-error">Failed to save. Try again.</p>}
+                                                {saveStatus === "error" && <p className="extract-error" title={saveError}>{saveError || "Failed to save. Try again."}</p>}
                                             </div>
                                         )}
                                     </div>
@@ -1338,10 +1348,11 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
 
                             {importLoading && (
                                 <div className="owner-import-loading">
+                                    <div className="extract-spinner"></div>
                                     <div className="owner-progress-bar">
                                         <div className="owner-progress-fill"></div>
                                     </div>
-                                    <p>Crawling menu pages with JS rendering... This may take 60-90 seconds for large sites.</p>
+                                    <p>Crawling menu pages with JS rendering… This may take 1–3 minutes (or up to 5 for large sites). Please don’t close the page.</p>
                                 </div>
                             )}
 
@@ -1398,7 +1409,7 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                 <button className="owner-save-btn" onClick={handleSaveMenu} disabled={saveStatus === "saving"}>
                                     {saveStatus === "saving" ? "⏳ Saving..." : saveStatus === "saved" ? "✅ Saved Successfully!" : "💾 Save Menu to Restaurant"}
                                 </button>
-                                {saveStatus === "error" && <span style={{ color: "#fca5a5", fontSize: "0.85rem" }}>Failed to save. Try again.</span>}
+                                {saveStatus === "error" && <span style={{ color: "#fca5a5", fontSize: "0.85rem" }} title={saveError}>{saveError || "Failed to save. Try again."}</span>}
                             </div>
                         )}
                     </div>

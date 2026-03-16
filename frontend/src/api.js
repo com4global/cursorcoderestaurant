@@ -10,7 +10,16 @@ async function request(path, options = {}) {
       err.status = 401;
       throw err;
     }
-    throw new Error(text || "Request failed");
+    let msg = text || "Request failed";
+    try {
+      const j = JSON.parse(text);
+      if (j && j.detail !== undefined) {
+        if (typeof j.detail === "string") msg = j.detail;
+        else if (Array.isArray(j.detail) && j.detail[0]?.msg) msg = j.detail[0].msg;
+        else if (Array.isArray(j.detail) && j.detail[0]) msg = String(j.detail[0]);
+      }
+    } catch (_) { /* use raw text */ }
+    throw new Error(msg);
   }
   return response.json();
 }
@@ -128,9 +137,10 @@ export async function createRestaurant(token, payload) {
 }
 
 export async function importMenuFromUrl(token, url) {
-  // Menu extraction is slow (30-90s): Playwright rendering + AI extraction
+  // Menu extraction can be slow: Playwright (multiple pages) + AI (OpenAI/Gemini). Allow up to 6 minutes.
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 180000); // 3 minute timeout
+  const timeoutMs = 360000; // 6 minutes
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const resp = await fetch(`${API_BASE}/owner/import-menu`, {
       method: "POST",
@@ -147,7 +157,7 @@ export async function importMenuFromUrl(token, url) {
   } catch (err) {
     clearTimeout(timeout);
     if (err.name === 'AbortError') {
-      throw new Error("Menu extraction timed out. The website may be too complex. Try a simpler menu page URL.");
+      throw new Error("Menu extraction timed out (over 6 minutes). Try a direct menu page URL or a smaller site.");
     }
     throw err;
   }
