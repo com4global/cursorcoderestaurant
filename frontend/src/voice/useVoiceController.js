@@ -205,9 +205,14 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
             // === ON ===
             vlog('STATE', 'Voice ON', { iOS: _isIOS });
 
+            // DIAGNOSTIC ALERTS — will remove after debugging
+            const diag = (location.search || '').includes('voicedebug');
+            if (diag) alert('Step 1: Voice ON. iOS=' + _isIOS);
+
             // CRITICAL: Prime AudioContext during this user gesture (tap)
             // This is the ONE chance to unlock audio on iOS
             ttsPlayerRef.current?.primeForIOS();
+            if (diag) alert('Step 2: AudioContext primed');
 
             voiceModeRef.current = true;
             setVoiceMode(true);
@@ -218,8 +223,10 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 stream.getTracks().forEach(t => t.stop());
                 vlog('MIC', 'Mic permission granted');
+                if (diag) alert('Step 3: Mic permission GRANTED');
             } catch (err) {
                 vlog('ERR', `Mic permission: ${err.name} ${err.message}`);
+                if (diag) alert('Step 3: Mic FAILED: ' + err.name + ' ' + err.message);
                 if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
                     setVoiceTranscript('⚠️ Microphone blocked — enable in settings');
                 } else if (err.name === 'NotFoundError') {
@@ -232,10 +239,12 @@ export function useVoiceController({ apiBase, doSendRef, language = 'en' }) {
             }
 
             // Speak greeting (TTS will call restartListening when done)
+            if (diag) alert('Step 4: About to speak greeting');
             const greet = languageRef.current === 'ta'
                 ? "வணக்கம்! நீங்கள் என்ன சாப்பிட விரும்புகிறீர்கள்?"
                 : "Hello! What would you like to eat?";
             speak(greet);
+            if (diag) alert('Step 5: speak() called. TTS should play then STT starts.');
         }
     }, [voiceMode, speak]);
 
