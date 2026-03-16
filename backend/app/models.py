@@ -18,6 +18,7 @@ class User(Base):
     sessions = relationship("ChatSession", back_populates="user")
     orders = relationship("Order", back_populates="user")
     restaurants = relationship("Restaurant", back_populates="owner")
+    taste_profile = relationship("TasteProfile", back_populates="user", uselist=False)
 
 
 class Restaurant(Base):
@@ -38,7 +39,6 @@ class Restaurant(Base):
     notification_phone = Column(String(20), nullable=True)
     rating = Column(Float, nullable=True)  # 1.0-5.0 star rating
     avg_prep_minutes = Column(Integer, default=20, nullable=False)  # average prep time for ETA
-    dine_in_enabled = Column(Boolean, default=False, nullable=False)  # owner toggle for QR dine-in
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -71,6 +71,7 @@ class MenuItem(Base):
     portion_people = Column(Integer, nullable=True)       # how many people this feeds
     cuisine = Column(String(60), nullable=True)            # e.g. "Indian", "Italian"
     protein_type = Column(String(40), nullable=True)       # e.g. "chicken", "veg", "paneer"
+    tags = Column(Text, nullable=True)                     # JSON array: ["spicy", "vegetarian", "biryani"]
     calories = Column(Integer, nullable=True)
     prep_time_mins = Column(Integer, nullable=True)
 
@@ -84,8 +85,6 @@ class Order(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     restaurant_id = Column(Integer, ForeignKey("restaurants.id"), nullable=False)
     status = Column(String(40), default="pending", nullable=False)
-    order_type = Column(String(20), default="pickup", nullable=False)  # pickup or dine_in
-    table_number = Column(String(20), nullable=True)  # e.g. "5", "A3", "patio-2"
     total_cents = Column(Integer, default=0, nullable=False)
     estimated_ready_at = Column(DateTime, nullable=True)     # ETA for customer
     status_updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)  # last status change
@@ -101,11 +100,28 @@ class OrderItem(Base):
 
     id = Column(Integer, primary_key=True)
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
-    menu_item_id = Column(Integer, ForeignKey("menu_items.id"), nullable=False)
+    menu_item_id = Column(Integer, ForeignKey("menu_items.id"), nullable=True)  # nullable so menu can be replaced; order keeps quantity/price
     quantity = Column(Integer, nullable=False)
     price_cents = Column(Integer, nullable=False)
 
     order = relationship("Order", back_populates="items")
+
+
+class OrderFeedback(Base):
+    """Post-order feedback: rating, issues, comment, photo. Rating <= 2 escalates to restaurant."""
+    __tablename__ = "order_feedbacks"
+
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, unique=True)  # one feedback per order
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    rating = Column(Integer, nullable=False)  # 1-5
+    issues = Column(Text, nullable=True)  # JSON array: ["cold_food", "taste_bad", ...]
+    comment = Column(Text, nullable=True)
+    photo_url = Column(String(500), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    order = relationship("Order", backref="feedback")
+    user = relationship("User", backref="order_feedbacks")
 
 
 class ChatSession(Base):
@@ -134,6 +150,22 @@ class ChatMessage(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     session = relationship("ChatSession", back_populates="messages")
+
+
+class TasteProfile(Base):
+    """User taste preferences for AI flavor profile and personalized recommendations."""
+    __tablename__ = "taste_profiles"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
+    spice_level = Column(String(20), default="medium", nullable=False)  # mild, medium, spicy
+    diet = Column(String(40), nullable=True)  # any, vegetarian, vegan, halal
+    liked_cuisines = Column(Text, nullable=True)  # JSON array of strings
+    disliked_tags = Column(Text, nullable=True)  # free text e.g. "nuts, dairy"
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    user = relationship("User", back_populates="taste_profile")
 
 
 class Subscription(Base):
@@ -169,4 +201,38 @@ class Payment(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     user = relationship("User", backref="payments")
+
+
+# --- Group Ordering ---
+
+class GroupOrderSession(Base):
+    """A group order session: one share link, many members with preferences."""
+    __tablename__ = "group_order_sessions"
+
+    id = Column(Integer, primary_key=True)
+    share_code = Column(String(20), unique=True, index=True, nullable=False)  # e.g. "8734" for app.com/group/8734
+    creator_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # optional: logged-in creator
+    status = Column(String(40), default="active", nullable=False)  # active, closed, ordered
+    delivery_address_zipcode = Column(String(10), nullable=True)  # optional for distance scoring
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    creator = relationship("User", backref="group_sessions_created")
+    members = relationship("GroupOrderMember", back_populates="group_session", cascade="all, delete-orphan")
+
+
+class GroupOrderMember(Base):
+    """A member in a group order: name, preference, budget, dietary restrictions."""
+    __tablename__ = "group_order_members"
+
+    id = Column(Integer, primary_key=True)
+    group_session_id = Column(Integer, ForeignKey("group_order_sessions.id"), nullable=False)
+    name = Column(String(120), nullable=False)
+    preference = Column(String(200), nullable=True)  # e.g. "biryani", "veg", "spicy"
+    budget_cents = Column(Integer, nullable=True)  # max spend per person
+    dietary_restrictions = Column(String(200), nullable=True)  # e.g. "vegetarian", "no dairy"
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # optional: link to app user
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    group_session = relationship("GroupOrderSession", back_populates="members")
+    user = relationship("User", backref="group_memberships")
 
