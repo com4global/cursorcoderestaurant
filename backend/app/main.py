@@ -19,6 +19,7 @@ from .auth import create_access_token, get_current_user, get_current_user_option
 from .config import settings
 from .db import get_db, engine
 from .voice import router as voice_router
+from .voice_ws import router as voice_ws_router
 from .ai_dashboard import router as ai_dashboard_router
 
 try:
@@ -128,26 +129,29 @@ def _ensure_order_items_menu_item_nullable():
             raise
 
 
-try:
-    _ensure_chat_sessions_columns()
-except Exception as e:
-    print(f"[startup] chat_sessions columns check skipped: {e}")
-try:
-    _ensure_menu_items_columns()
-except Exception as e:
-    print(f"[startup] menu_items columns check skipped: {e}")
-try:
-    _ensure_taste_profiles_columns()
-except Exception as e:
-    print(f"[startup] taste_profiles columns check skipped: {e}")
-try:
-    _ensure_order_items_menu_item_nullable()
-except Exception as e:
-    print(f"[startup] order_items menu_item_id nullable check skipped: {e}")
-
 app = FastAPI(title="RestarentAI")
 app.include_router(voice_router)
+app.include_router(voice_ws_router)
 app.include_router(ai_dashboard_router)
+
+@app.on_event("startup")
+def startup_event():
+    try:
+        _ensure_chat_sessions_columns()
+    except Exception as e:
+        print(f"[startup] chat_sessions columns check skipped: {e}")
+    try:
+        _ensure_menu_items_columns()
+    except Exception as e:
+        print(f"[startup] menu_items columns check skipped: {e}")
+    try:
+        _ensure_taste_profiles_columns()
+    except Exception as e:
+        print(f"[startup] taste_profiles columns check skipped: {e}")
+    try:
+        _ensure_order_items_menu_item_nullable()
+    except Exception as e:
+        print(f"[startup] order_items menu_item_id nullable check skipped: {e}")
 
 app.add_middleware(
     CORSMiddleware,

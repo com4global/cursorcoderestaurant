@@ -5,6 +5,7 @@ import OwnerPortal from "./OwnerPortal.jsx";
 import TasteProfile from "./TasteProfile.jsx";
 import { useVoiceController } from "./voice/useVoiceController.js";
 import { trace, traceError } from "./voice/trace.js";
+import { useStreamingVoice } from "./voice/StreamingVoiceController.js";
 
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
 
@@ -287,15 +288,71 @@ export default function App() {
   const doSendRef = useRef(null);
   const voiceSpeakRef = useRef(null);
   const [voiceLanguage, setVoiceLanguage] = useState("en");
+  const [streamingMode, setStreamingMode] = useState(true); // true = WebSocket streaming, false = browser-native
+
+  // Browser-native voice controller (fallback)
   const voice = useVoiceController({ apiBase: API, doSendRef, language: voiceLanguage });
-  const { voiceMode, voiceState, setVoiceState, liveTranscript, voiceTranscript, isListening, voiceModeRef, voiceStateRef } = voice;
+  const voiceModeRef = voice.voiceModeRef;
+  const voiceStateRef = voice.voiceStateRef;
   const voiceStartListeningRef = useRef(null);
   const lastVoicePromptRef = useRef(null);
+
+  // WebSocket streaming voice controller
+  const wsBaseUrl = API.replace(/^http/, 'ws');
+  const streamVoice = useStreamingVoice({
+    wsUrl: `${wsBaseUrl}/ws/voice`,
+    token: token,
+    sessionId: sessionId,
+    restaurantId: selectedRestaurant?.id || null,
+    onTranscript: (text, isFinal) => {
+      if (isFinal) console.log(`%c[StreamVoice] Transcript: "${text}"`, 'color: #00bbff');
+    },
+    onResponse: (data) => {
+      // Update session and display response
+      if (data.session_id) setSessionId(data.session_id);
+      if (data.text) {
+        setMessages((p) => [...p, {
+          role: 'bot',
+          content: data.text,
+          categories: data.categories,
+          items: data.items,
+        }]);
+      }
+      if (data.categories?.length > 0) {
+        setActiveCategories(data.categories);
+      }
+    },
+    onStateChange: (state) => {
+      // Keep voiceStateRef in sync for UI
+    },
+  });
+
+  // Unified voice state — picks from active controller
+  const voiceMode = streamingMode ? streamVoice.voiceMode : voice.voiceMode;
+  const voiceState = streamingMode ? streamVoice.voiceState : voice.voiceState;
+  const liveTranscript = streamingMode ? streamVoice.liveTranscript : voice.liveTranscript;
+  const voiceTranscript = voice.voiceTranscript || '';
+  const isListening = streamingMode ? streamVoice.isListening : voice.isListening;
+
+  const setVoiceState = (state) => {
+    if (streamingMode && streamVoice.setVoiceState) streamVoice.setVoiceState(state);
+    else if (voice.setVoiceState) voice.setVoiceState(state);
+  };
+  const setVoiceMode = (mode) => {
+    if (streamingMode && streamVoice.setVoiceMode) streamVoice.setVoiceMode(mode);
+    else if (voice.setVoiceMode) voice.setVoiceMode(mode);
+  };
+
   // Bridge voiceSpeakRef for doSend's fromVoice paths
   useEffect(() => {
-    voiceSpeakRef.current = (text) => voice.speak(text);
-    voiceStartListeningRef.current = () => voice.startListening();
-  }, [voice.speak, voice.startListening]);
+    if (streamingMode) {
+      voiceSpeakRef.current = (text) => streamVoice.speak(text);
+      voiceStartListeningRef.current = () => { }; // handled by WebSocket
+    } else {
+      voiceSpeakRef.current = (text) => voice.speak(text);
+      voiceStartListeningRef.current = () => voice.startListening();
+    }
+  }, [streamingMode, voice.speak, voice.startListening, streamVoice.speak]);
 
   // Owner
   const [showOwnerPortal, setShowOwnerPortal] = useState(() => localStorage.getItem("userRole") === "owner");
@@ -370,7 +427,7 @@ export default function App() {
     const m = hash.match(/^#?group\/([^/]+)/);
     if (m) {
       setTab("group");
-      getGroupSession(m[1]).then(setGroupViewSession).catch(() => {});
+      getGroupSession(m[1]).then(setGroupViewSession).catch(() => { });
     }
   }, []);
 
@@ -560,11 +617,15 @@ export default function App() {
     if (userLat != null && userLng != null) await fetchRestaurantsData(userLat, userLng, newRadius);
   };
 
-  // ===================== VOICE (ULTRA-LOW LATENCY via useVoiceController) =====================
-  // All voice logic (STT, TTS, intent parsing, state machine, barge-in) is in the hook.
-  // toggleVoiceMode and startListening are thin wrappers.
-  const toggleVoiceMode = () => voice.toggleVoiceMode();
-  const startListening = () => voice.toggleVoiceMode();
+  // ===================== VOICE (Dual Mode: WebSocket Streaming / Browser-Native) =====================
+  const toggleVoiceMode = () => {
+    if (streamingMode) {
+      streamVoice.toggleVoiceMode();
+    } else {
+      voice.toggleVoiceMode();
+    }
+  };
+  const startListening = () => toggleVoiceMode();
 
 
   // ===================== CHAT / SEND =====================
@@ -1074,7 +1135,7 @@ export default function App() {
         }
       } else if (textToSend.startsWith('category:') && res.category_id) {
         // Chat returned category but no items (e.g. session/restaurant mismatch) — load items via REST
-        fetchCategoryItems(res.category_id).then((items) => setCurrentItems(Array.isArray(items) ? items : [])).catch(() => {});
+        fetchCategoryItems(res.category_id).then((items) => setCurrentItems(Array.isArray(items) ? items : [])).catch(() => { });
       }
       if (res.cart_summary) setCartData(res.cart_summary);
       if (text.trim().startsWith("add:")) {
@@ -2070,7 +2131,7 @@ export default function App() {
                                     setFeedbackRating((p) => { const n = { ...p }; delete n[order.id]; return n; });
                                     setFeedbackIssues((p) => { const n = { ...p }; delete n[order.id]; return n; });
                                     setFeedbackComment((p) => { const n = { ...p }; delete n[order.id]; return n; });
-                                    fetchMyOrders(token).then(setMyOrders).catch(() => {});
+                                    fetchMyOrders(token).then(setMyOrders).catch(() => { });
                                   } catch (err) {
                                     console.error(err);
                                   } finally {
