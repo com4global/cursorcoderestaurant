@@ -2822,8 +2822,27 @@ def import_menu_from_url(
                         return unique;
                     }""")
 
+                    # Step 2b: Click "More" dropdown first to expose hidden categories
+                    try:
+                        page.evaluate("""() => {
+                            const moreLinks = document.querySelectorAll('a, button, div[role="button"]');
+                            for (const el of moreLinks) {
+                                const t = el.innerText.trim().toUpperCase();
+                                if (t === 'MORE' || t === 'MORE ▾' || t === 'MORE ▼') {
+                                    el.click();
+                                    break;
+                                }
+                            }
+                        }""")
+                        page.wait_for_timeout(1000)
+                    except Exception:
+                        pass
+
                     # Click each category element to force-load its items
+                    # IMPORTANT: Accumulate text after EACH click because SPA sites
+                    # (e.g. Square Online) replace item content on category switch.
                     clicked = set()
+                    accumulated_texts = []
                     for cat_info in cat_elements[:40]:  # Cap at 40 categories
                         cat_text = cat_info.get("text", "").strip()
                         cat_upper = cat_text.upper()
@@ -2859,59 +2878,72 @@ def import_menu_from_url(
                                         el = walker.nextNode();
                                     }}
                                 }}""")
-                            page.wait_for_timeout(2000)  # Wait for SPA to fetch + render
+                            page.wait_for_timeout(3000)  # Wait for SPA to fetch + render (Square needs 3s)
                             # Scroll content area to trigger lazy rendering within category
-                            page.evaluate("window.scrollBy(0, 400)")
-                            page.wait_for_timeout(500)
+                            for _s in range(5):
+                                page.evaluate("window.scrollBy(0, 500)")
+                                page.wait_for_timeout(300)
+                            # Capture ONLY menu content area for this category
+                            # (not full page — avoids repeated nav/header/footer in every snapshot)
+                            snapshot = page.evaluate("""() => {
+                                // Try to find the main content area (skip nav, sidebar, header, footer)
+                                const skip = new Set();
+                                document.querySelectorAll('nav, header, footer, [class*="sidebar"], [class*="side-bar"], [class*="category-nav"], [class*="categoryNav"]').forEach(el => skip.add(el));
+                                // Find the largest content container that's not nav
+                                const main = document.querySelector('main, [role="main"], #main-content, .main-content, [class*="order-content"], [class*="menu-content"], [class*="item-list"], [class*="product-list"]');
+                                const target = main || document.body;
+                                // Get text but skip nav elements
+                                let text = '';
+                                const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT, null, false);
+                                let node = walker.nextNode();
+                                while (node) {
+                                    let parent = node.parentElement;
+                                    let inSkip = false;
+                                    while (parent && parent !== target) {
+                                        if (skip.has(parent) || parent.tagName === 'NAV' || parent.tagName === 'HEADER' || parent.tagName === 'FOOTER') {
+                                            inSkip = true;
+                                            break;
+                                        }
+                                        parent = parent.parentElement;
+                                    }
+                                    if (!inSkip && node.textContent.trim()) {
+                                        text += node.textContent.trim() + '\\n';
+                                    }
+                                    node = walker.nextNode();
+                                }
+                                return text;
+                            }""")
+                            if snapshot and len(snapshot) > 100:
+                                accumulated_texts.append(f"=== CATEGORY: {cat_text} ===\n{snapshot}")
+                                print(f"[MenuExtract]   📋 Category '{cat_text}': {len(snapshot)} chars captured")
                         except Exception:
                             continue
 
                 except Exception:
                     pass
 
-                # Step 3: Final full scroll to capture everything
-                page.evaluate("window.scrollTo(0, 0)")
-                page.wait_for_timeout(500)
-                for _ in range(50):
-                    page.evaluate("window.scrollBy(0, 600)")
-                    page.wait_for_timeout(300)
-                    curr = page.evaluate("document.body.scrollHeight")
-                    scroll_pos = page.evaluate("window.scrollY + window.innerHeight")
-                    if scroll_pos >= curr:
-                        break
+                # Step 3: Build final text
+                if accumulated_texts:
+                    # Use accumulated snapshots — this is the key fix for SPA sites
+                    # that replace content on each category click (e.g. Square Online)
+                    text = "\n\n".join(accumulated_texts)
+                    print(f"[MenuExtract] ✅ Accumulated {len(accumulated_texts)} category snapshots ({len(text)} total chars)")
+                else:
+                    # No categories clicked — do a final full scroll and capture once
+                    page.evaluate("window.scrollTo(0, 0)")
+                    page.wait_for_timeout(500)
+                    for _ in range(50):
+                        page.evaluate("window.scrollBy(0, 600)")
+                        page.wait_for_timeout(300)
+                        curr = page.evaluate("document.body.scrollHeight")
+                        scroll_pos = page.evaluate("window.scrollY + window.innerHeight")
+                        if scroll_pos >= curr:
+                            break
+                    text = page.evaluate("""() => {
+                        document.querySelectorAll('script, style, noscript, svg').forEach(el => el.remove());
+                        return document.body.innerText;
+                    }""")
 
-                # Extract text — try structured extraction first, then fall back to innerText
-                text = page.evaluate("""() => {
-                    // Remove non-content elements
-                    document.querySelectorAll('script, style, noscript, svg, nav, footer, header').forEach(el => el.remove());
-                    
-                    // Try to find menu item cards/containers for structured extraction
-                    const items = [];
-                    const cardSelectors = [
-                        '[class*="menu-item"]', '[class*="menuItem"]', '[class*="item-card"]',
-                        '[class*="product-card"]', '[class*="food-item"]', '[class*="dish"]',
-                        '[data-testid*="item"]', '[data-testid*="product"]',
-                        '.item', '.product', '.menu-card'
-                    ];
-                    
-                    for (const sel of cardSelectors) {
-                        const cards = document.querySelectorAll(sel);
-                        if (cards.length > 3) {
-                            cards.forEach(card => {
-                                const t = card.innerText.trim();
-                                if (t && t.length > 5) items.push(t);
-                            });
-                            break;
-                        }
-                    }
-                    
-                    if (items.length > 5) {
-                        return items.join('\n---\n');
-                    }
-                    
-                    // Fallback: plain innerText
-                    return document.body.innerText;
-                }""")
                 browser.close()
                 if text and len(text) > 500:
                     return text
@@ -3017,8 +3049,8 @@ def import_menu_from_url(
                        'ALL SALES ARE FINAL', 'Stay in the Loop',
                        'Helpful Information', 'Returns Policy']:
             clean = clean.replace(noise, '')
-        # Keep up to 15000 chars per page
-        clean = clean[:15000]
+        # Keep up to 25000 chars per page (large menus need more space)
+        clean = clean[:25000]
         if len(clean) > 100:
             label = page_url.split("//", 1)[-1]
             combined_parts.append(f"=== PAGE: {label} ===\n{clean}")
@@ -3029,8 +3061,8 @@ def import_menu_from_url(
     if len(content) < 100:
         return {"error": "Could not extract content from this website. Try a direct menu page URL or a food delivery page (DoorDash, UberEats, Grubhub)."}
 
-    # Limit total content for the LLM
-    content = content[:40000]
+    # Limit total content for the LLM (raised for large menus like Aroma with 20+ categories)
+    content = content[:80000]
 
     def _parse_menu_json(raw_text):
         """Parse menu JSON from LLM output; handle ```json wrapping and stray text."""
