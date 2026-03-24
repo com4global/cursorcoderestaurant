@@ -3,6 +3,11 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  test: {
+    environment: "node",
+    include: ["src/**/*.test.js", "src/**/*.test.jsx"],
+    testTimeout: 60000,
+  },
   server: {
     port: 5173,
     host: process.env.TAURI_DEV_HOST || false,

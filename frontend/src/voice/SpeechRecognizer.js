@@ -31,6 +31,7 @@ export class SpeechRecognizer {
         this.apiBase = options.apiBase || '';
         this.keepListeningOnFinal = options.keepListeningOnFinal === true;
         this._intentionallyStopped = false;
+        this._receivedFinalTranscript = false;
         this._useFallback = false;
         this._mediaRecorder = null;
         this._audioChunks = [];
@@ -44,6 +45,7 @@ export class SpeechRecognizer {
         this.onStateChange = null;
         this.onError = null;
         this.onSpeechDetected = null;
+        this.onStoppedWithoutTranscript = null;
     }
 
     static isSupported() {
@@ -72,6 +74,7 @@ export class SpeechRecognizer {
         this.stop();
         this.finalTranscript = '';
         this._intentionallyStopped = false;
+        this._receivedFinalTranscript = false;
 
         const recognition = new SR();
         if (_isIOSWebKit) {
@@ -132,6 +135,7 @@ export class SpeechRecognizer {
                 this.finalTranscript = '';
                 this._lastInterim = '';
                 this._lastConfidence = 0;
+                this._receivedFinalTranscript = true;
                 this.onLiveTranscript?.('');
                 this.onFinalTranscript?.(textToSend, confidence);
                 return;
@@ -147,6 +151,7 @@ export class SpeechRecognizer {
                     this.finalTranscript = '';
                     this._lastInterim = '';
                     this._lastConfidence = 0;
+                    this._receivedFinalTranscript = true;
                     this.onLiveTranscript?.('');
                     if (!this.keepListeningOnFinal) this.stop();
                     this.onFinalTranscript?.(textToSend, confidence);
@@ -183,6 +188,10 @@ export class SpeechRecognizer {
             this.isListening = false;
             vlog('STT', 'recognition.onend', { stopped: this._intentionallyStopped, iOS: _isIOSWebKit });
 
+            if (this._intentionallyStopped && !this._receivedFinalTranscript) {
+                this.onStoppedWithoutTranscript?.();
+            }
+
             if (_isIOSWebKit) {
                 this.onStateChange?.('idle');
                 return;
@@ -218,6 +227,7 @@ export class SpeechRecognizer {
     async _startMediaRecorder() {
         this.stop();
         this._intentionallyStopped = false;
+        this._receivedFinalTranscript = false;
         this._audioChunks = [];
 
         try {
@@ -337,6 +347,9 @@ export class SpeechRecognizer {
 
                 if (this._intentionallyStopped || this._audioChunks.length === 0) {
                     vlog('MIC', 'MediaRecorder stopped (no data or intentional)');
+                    if (!this._receivedFinalTranscript) {
+                        this.onStoppedWithoutTranscript?.();
+                    }
                     this.isListening = false;
                     this.onStateChange?.('idle');
                     return;
@@ -366,10 +379,12 @@ export class SpeechRecognizer {
                         const transcript = (data.transcript || '').trim();
                         vlog('STT', `Backend STT: "${transcript}"`);
                         if (transcript) {
+                            this._receivedFinalTranscript = true;
                             this.onLiveTranscript?.(transcript);
                             this.onFinalTranscript?.(transcript, 0.8);
                         } else {
                             vlog('STT', 'Empty transcript');
+                            this.onStoppedWithoutTranscript?.();
                             this.onError?.("Didn't catch that — try speaking closer to mic");
                             this.onStateChange?.('idle');
                         }
@@ -419,8 +434,39 @@ export class SpeechRecognizer {
         }
     }
 
+    finish() {
+        clearTimeout(this.debounceTimer);
+        clearTimeout(this._recorderTimeout);
+        clearInterval(this._vadInterval);
+        this.isListening = false;
+        this._intentionallyStopped = true;
+
+        if (this.recognition) {
+            try {
+                if (typeof this.recognition.stop === 'function') {
+                    this.recognition.stop();
+                    vlog('STT', 'recognition.stop() called');
+                } else {
+                    this.recognition.abort();
+                    this.recognition = null;
+                }
+            } catch {
+                try { this.recognition.abort(); } catch { }
+                this.recognition = null;
+            }
+            return;
+        }
+
+        if (this._mediaRecorder && this._mediaRecorder.state === 'recording') {
+            this.stopRecording();
+            return;
+        }
+
+        this.onStateChange?.('idle');
+    }
+
     setLang(lang) {
-        this.lang = lang || 'en-IN';
+        this.lang = (typeof lang === 'string' && lang === 'ta-IN') ? 'ta-IN' : 'en-IN';
     }
 
     stop() {
@@ -451,6 +497,7 @@ export class SpeechRecognizer {
         this.onStateChange = null;
         this.onError = null;
         this.onSpeechDetected = null;
+        this.onStoppedWithoutTranscript = null;
     }
 }
 

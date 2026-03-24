@@ -3,8 +3,12 @@ import { motion, AnimatePresence } from "framer-motion";
 import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, submitFeedback, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, verifyPayment, trackOrder, getRestaurantQueue, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal, fetchCategoryItems, createGroupSession, getGroupSession, joinGroupSession, getGroupRecommendation, getGroupSplitEqual } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
 import TasteProfile from "./TasteProfile.jsx";
+import { dedupeRestaurants } from "./restaurantList.js";
 import { useVoiceController } from "./voice/useVoiceController.js";
-import { trace, traceError } from "./voice/trace.js";
+import { APP_QUERY_ROUTES, decideAppQueryRoute, isSelectedRestaurantSuggestionRequest } from "./voice/queryRouting.js";
+import { matchCategory, matchItem } from "./voice/voiceMatch.js";
+import { trace, traceError, traceTiming } from "./voice/trace.js";
+import { INTENTS } from "./voice/IntentParser.js";
 
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
 
@@ -40,6 +44,39 @@ function resolvePartneredRestaurant(r, partneredList) {
   );
   if (hit && n.length >= 3) return { ...hit, partnered: true };
   return r;
+}
+
+function buildMenuOnboardingMessage(name) {
+  return `**${name}** is being onboarded right now. We are in touch with the restaurant owner to add the full menu to RestaurantAI. Please try another restaurant for now and check back soon.`;
+}
+
+function buildMenuOnboardingNotice(name) {
+  return {
+    restaurantName: name,
+    eyebrow: "Menu onboarding in progress",
+    title: `${name} is joining RestaurantAI`,
+    body: "We are working with the restaurant owner to add the full menu. Please try another restaurant for now and check back soon.",
+    hint: "Browse another restaurant while we finish the setup.",
+  };
+}
+
+function rankContextSuggestionItems(items = [], intentResult = {}, fallbackLimit = 10) {
+  if (!Array.isArray(items) || items.length === 0) return [];
+
+  const spiceRequested = intentResult?.entities?.spice === "spicy";
+  if (!spiceRequested) return items.slice(0, fallbackLimit);
+
+  const spicyHints = /(spicy|chili|chilli|pepper|hot|65|schezwan|masala|tikka|lollipop|manchurian|fry)/i;
+  const ranked = items
+    .map((item) => {
+      const haystack = `${item?.name || ""} ${item?.description || ""}`;
+      return { item, score: spicyHints.test(haystack) ? 2 : 0 };
+    })
+    .sort((left, right) => right.score - left.score)
+    .map((entry) => entry.item);
+
+  const spicyMatches = ranked.filter((item) => spicyHints.test(`${item?.name || ""} ${item?.description || ""}`));
+  return (spicyMatches.length > 0 ? spicyMatches : ranked).slice(0, fallbackLimit);
 }
 
 // Smart food emoji mapper
@@ -231,6 +268,7 @@ export default function App() {
 
   // Restaurants
   const [restaurants, setRestaurants] = useState([]);
+  const [restaurantsError, setRestaurantsError] = useState(null);
   const [nearbyPlaces, setNearbyPlaces] = useState([]);
   // Selected restaurant persisted in localStorage
   const [selectedRestaurant, _setSelectedRestaurant] = useState(() => {
@@ -266,6 +304,7 @@ export default function App() {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [filteredRestaurants, setFilteredRestaurants] = useState([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [categoryNav, setCategoryNav] = useState({ canScrollLeft: false, canScrollRight: false });
 
   // Cart
   const [cartData, setCartData] = useState(null);
@@ -286,9 +325,82 @@ export default function App() {
   // Voice Conversation Mode — powered by useVoiceController hook (English / Tamil)
   const doSendRef = useRef(null);
   const voiceSpeakRef = useRef(null);
+  const inputRef = useRef(null);
+  const categoryStripRef = useRef(null);
+  const composerDraftBeforeVoiceRef = useRef("");
   const [voiceLanguage, setVoiceLanguage] = useState("en");
-  const voice = useVoiceController({ apiBase: API, doSendRef, language: voiceLanguage });
-  const { voiceMode, voiceState, setVoiceState, liveTranscript, voiceTranscript, isListening, voiceModeRef, voiceStateRef } = voice;
+  const updateComposerText = useCallback((val) => {
+    setMessageText(val);
+    if (val.startsWith("#")) {
+      const q = val.slice(1).toLowerCase();
+      const partnered = restaurants.filter(
+        (r) => r.name.toLowerCase().includes(q) || r.slug.toLowerCase().includes(q)
+      ).map((r) => ({ ...r, partnered: true }));
+      const partneredNorms = new Set(partnered.map((p) => normRestName(p.name)));
+      const nearby = nearbyPlaces
+        .filter((r) => r.name.toLowerCase().includes(q))
+        .filter((r) => {
+          const nn = normRestName(r.name);
+          for (const pn of partneredNorms) {
+            if (pn === nn || pn.includes(nn) || nn.includes(pn)) return false;
+          }
+          return true;
+        })
+        .map((r) => ({
+          ...r,
+          slug: r.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
+          partnered: false,
+        }));
+      const combined = [...partnered, ...nearby];
+      setFilteredRestaurants(combined);
+      setShowSuggestions(combined.length > 0);
+      setSelectedIndex(0);
+    } else {
+      setShowSuggestions(false);
+    }
+  }, [nearbyPlaces, restaurants]);
+  const buildComposerVoiceText = useCallback((text) => {
+    const transcript = String(text || "")
+      .replace(/^🎤\s*Listening\.\.\.$/, "")
+      .replace(/^⏳\s*Processing\.\.\.$/, "")
+      .trim();
+    const prefix = composerDraftBeforeVoiceRef.current.trim();
+    if (!transcript) return prefix;
+    return prefix ? `${prefix} ${transcript}` : transcript;
+  }, []);
+  const handleVoiceTranscriptInterim = useCallback((text) => {
+    const nextText = buildComposerVoiceText(text);
+    updateComposerText(nextText);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [buildComposerVoiceText, updateComposerText]);
+  const handleVoiceTranscriptReady = useCallback((text) => {
+    const transcript = String(text || "").trim();
+    if (!transcript) return;
+    updateComposerText(buildComposerVoiceText(transcript));
+    setStatus("Voice converted to text. Review and press send.");
+    requestAnimationFrame(() => {
+      const composer = inputRef.current;
+      if (composer) {
+        composer.style.height = "auto";
+        composer.style.height = `${Math.min(composer.scrollHeight, 132)}px`;
+      }
+    });
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [buildComposerVoiceText, updateComposerText]);
+  const handleVoiceTranscriptCanceled = useCallback(() => {
+    updateComposerText(composerDraftBeforeVoiceRef.current);
+    setStatus("No voice input detected.");
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [updateComposerText]);
+  const voice = useVoiceController({
+    apiBase: API,
+    doSendRef,
+    language: voiceLanguage,
+    onTranscriptReady: handleVoiceTranscriptReady,
+    onTranscriptInterim: handleVoiceTranscriptInterim,
+    onTranscriptCanceled: handleVoiceTranscriptCanceled,
+  });
+  const { voiceMode, setVoiceMode, voiceState, setVoiceState, liveTranscript, voiceTranscript, isListening, voiceModeRef, voiceStateRef } = voice;
   const voiceStartListeningRef = useRef(null);
   const lastVoicePromptRef = useRef(null);
   // Bridge voiceSpeakRef for doSend's fromVoice paths
@@ -297,12 +409,19 @@ export default function App() {
     voiceStartListeningRef.current = () => voice.startListening();
   }, [voice.speak, voice.startListening]);
 
+  // Preload intent/state modules when voice is turned on so first voice command has no import delay
+  useEffect(() => {
+    if (voiceMode) {
+      import("./voice/IntentParser.js").catch(() => {});
+      import("./voice/ConversationState.js").catch(() => {});
+    }
+  }, [voiceMode]);
+
   // Owner
   const [showOwnerPortal, setShowOwnerPortal] = useState(() => localStorage.getItem("userRole") === "owner");
   const [userRole, setUserRole] = useState(() => localStorage.getItem("userRole") || "customer");
 
   // Refs
-  const inputRef = useRef(null);
   const chatEndRef = useRef(null);
   const [addedItemId, setAddedItemId] = useState(null);
   // Conversation state (persists filters across turns: dish, price, restaurant, diet)
@@ -310,8 +429,15 @@ export default function App() {
 
   // Helper: build sendMessage payload with restaurant_id for session recovery
   const buildChatPayload = (text, overrideSessionId) => {
-    const payload = { session_id: overrideSessionId !== undefined ? overrideSessionId : sessionId, text };
-    if (selectedRestaurant?.id) payload.restaurant_id = selectedRestaurant.id;
+    const payload = {
+      session_id: overrideSessionId !== undefined ? overrideSessionId : sessionId,
+      text,
+      restaurant_id: selectedRestaurant?.id ?? null,
+    };
+    if (Number.isFinite(userLat) && Number.isFinite(userLng)) {
+      payload.lat = userLat;
+      payload.lng = userLng;
+    }
     return payload;
   };
 
@@ -341,6 +467,9 @@ export default function App() {
   const [groupPreferRestaurantIds, setGroupPreferRestaurantIds] = useState([]);
   const [groupPreferCuisine, setGroupPreferCuisine] = useState("");
   const [groupRestaurantOptions, setGroupRestaurantOptions] = useState([]);
+
+  // Last item added via voice, for quick undo
+  const lastVoiceCartItemRef = useRef(null);
 
   // ===================== EFFECTS =====================
 
@@ -377,7 +506,9 @@ export default function App() {
   // Load restaurant list for group recommendation preference (when group session exists)
   useEffect(() => {
     if (tab !== "group" || (!groupSession && !groupViewSession)) return;
-    listRestaurants().then(setGroupRestaurantOptions).catch(() => setGroupRestaurantOptions([]));
+    listRestaurants()
+      .then((data) => setGroupRestaurantOptions(dedupeRestaurants(Array.isArray(data) ? data : [])))
+      .catch(() => setGroupRestaurantOptions([]));
   }, [tab, groupSession, groupViewSession]);
 
   // Handle Stripe payment redirect URL params
@@ -414,20 +545,43 @@ export default function App() {
     }
   }, []); // Run once on mount
 
-  // Fetch restaurants
+  // Load all restaurants immediately so the list shows before geolocation
+  const loadRestaurants = useCallback(async () => {
+    setRestaurantsError(null);
+    try {
+      const data = await listRestaurants({});
+      setRestaurants(dedupeRestaurants(Array.isArray(data) ? data : []));
+    } catch (e) {
+      setRestaurants([]);
+      setRestaurantsError(e?.message || "Couldn't load restaurants. Is the backend running on port 8000?");
+    }
+  }, []);
+
+  useEffect(() => {
+    loadRestaurants();
+  }, [loadRestaurants]);
+
+  // Fetch restaurants (with optional location). If location filter returns empty, fallback to all restaurants.
   const fetchRestaurantsData = useCallback(async (lat, lng, r) => {
+    setRestaurantsError(null);
     try {
       const params = {};
       if (lat != null && lng != null) { params.lat = lat; params.lng = lng; params.radius_miles = r; }
-      const data = await listRestaurants(params);
-      setRestaurants(data);
+      let data = await listRestaurants(params);
+      if (lat != null && lng != null && (!data || data.length === 0)) {
+        data = await listRestaurants({});
+      }
+      setRestaurants(dedupeRestaurants(Array.isArray(data) ? data : []));
       if (lat != null && lng != null) {
         try {
           const nearby = await fetchNearby({ lat, lng, radius_miles: r });
           setNearbyPlaces(nearby);
         } catch { setNearbyPlaces([]); }
       }
-    } catch { setRestaurants([]); }
+    } catch (e) {
+      setRestaurants([]);
+      setRestaurantsError(e?.message || "Couldn't load restaurants.");
+    }
   }, []);
 
   // Auto-detect location on mount
@@ -562,19 +716,138 @@ export default function App() {
 
   // ===================== VOICE (ULTRA-LOW LATENCY via useVoiceController) =====================
   // All voice logic (STT, TTS, intent parsing, state machine, barge-in) is in the hook.
-  // toggleVoiceMode and startListening are thin wrappers.
-  const toggleVoiceMode = () => voice.toggleVoiceMode();
-  const startListening = () => voice.toggleVoiceMode();
+  // toggleVoiceMode is kept for the compact voice status bar close button.
+  const stopVoiceSession = () => voice.stopVoiceSession?.();
 
 
   // ===================== CHAT / SEND =====================
 
-  const doSend = async (text, fromVoice = false, voiceConfidence = 0) => {
+  const doSend = async (text, fromVoice = false, voiceConfidence = 0, options = {}) => {
     if (!text.trim()) return;
+    const { preserveComposerText = false, skipUserEcho = false } = options;
+    const t0 = performance.now();
     const trimmed = text.trim();
     trace('doSend.entry', { fromVoice, text: trimmed, voiceConfidence, selectedRestaurant: selectedRestaurant?.name ?? null, sessionId });
-    setMessages((p) => [...p, { role: "user", content: trimmed }]);
-    setMessageText(""); setShowSuggestions(false); setStatus("Thinking...");
+    traceTiming('doSend.entry', t0, { fromVoice, textLen: trimmed.length });
+    if (!skipUserEcho) {
+      setMessages((p) => [...p, { role: "user", content: trimmed }]);
+    }
+    if (!preserveComposerText) {
+      setMessageText("");
+    }
+    setShowSuggestions(false); setStatus("Thinking...");
+
+    // ── Voice: quick undo / correction ("no", "undo", "remove that") ──────
+    if (fromVoice && token && cartData && /^(no|undo|remove|not that)/i.test(trimmed)) {
+      const last = lastVoiceCartItemRef.current;
+      if (last?.order_item_id) {
+        try {
+          await removeCartItem(token, last.order_item_id);
+          const newCart = await fetchCart(token);
+          setCartData(newCart);
+          if (voiceModeRef.current) voiceSpeakRef.current(`Removed ${last.name}. What would you like instead?`, true);
+          setMessages((p) => [...p, { role: "bot", content: `Removed **${last.name}** from your cart.` }]);
+        } catch (err) {
+          console.error('[VoiceUndo] removeCartItem failed:', err);
+          if (voiceModeRef.current) voiceSpeakRef.current("I couldn't remove it. Please try again.", true);
+        }
+        setStatus("Ready.");
+        return;
+      }
+    }
+
+    // ── VOICE FAST PATH: item first when menu is visible, then category (so "mutton bone soup" → item, not category "Soups") ──────
+    // IMPORTANT: Only use item fast-path for very simple, single-name requests without quantities or corrections.
+    const hasQuantityOrComplex = /\d/.test(trimmed)
+      || /\b(one|two|three|four|five|six|seven|eight|nine|ten|pieces?|bottle|bottles?|from|said|not)\b/i.test(trimmed);
+    const allowItemFastPath = fromVoice && !hasQuantityOrComplex;
+
+    if (allowItemFastPath && currentItems.length > 0 && selectedRestaurant && token) {
+      const matchedItem = matchItem(currentItems, trimmed);
+      trace('voice.fastPath.item.tried', { input: trimmed, matched: matchedItem?.name ?? null });
+      if (matchedItem) {
+        traceTiming('voice.fastPath.item.matched', t0, { item: matchedItem.name, id: matchedItem.id });
+        if (voiceModeRef.current) voiceSpeakRef.current(`Added ${matchedItem.name}.`, true);
+        try {
+          const res = await sendMessage(token, buildChatPayload(`add:${matchedItem.id}:1`));
+          traceTiming('voice.fastPath.item.addDone', t0, { item: matchedItem.name });
+          if (res.session_id) setSessionId(res.session_id);
+          if (res.cart_summary) {
+            setCartData(res.cart_summary);
+            const groups = res.cart_summary.restaurants || [];
+            let last = null;
+            groups.forEach((g) => {
+              (g.items || []).forEach((it) => {
+                last = { order_item_id: it.order_item_id, name: it.name };
+              });
+            });
+            if (last) lastVoiceCartItemRef.current = last;
+          }
+          setMessages((p) => [...p, { role: "bot", content: res.reply || `Added **${matchedItem.name}** to cart.` }]);
+          setStatus("Ready.");
+          setTimeout(() => fetchCart(token).then((c) => {
+            setCartData(c);
+            const groups = c?.restaurants || [];
+            let last = null;
+            groups.forEach((g) => {
+              (g.items || []).forEach((it) => {
+                last = { order_item_id: it.order_item_id, name: it.name };
+              });
+            });
+            if (last) lastVoiceCartItemRef.current = last;
+          }).catch(() => {}), 300);
+          return;
+        } catch (err) {
+          traceError('voice.fastPath.item.addError', err);
+          if (voiceModeRef.current) voiceSpeakRef.current("Couldn't add. Try again.", true);
+        }
+      }
+    }
+
+    // Skip category fast path when user clearly wants to switch restaurant (e.g. "change the restaurant to aroma")
+    const switchRestaurantPhrase = /^(?:change|switch|go\s+to|take\s+me\s+to)\s+(?:the\s+)?(?:restaurant\s+to\s+)?(.+)$/i.test(trimmed)
+      || /^(?:the\s+)?restaurant\s+to\s+(.+)$/i.test(trimmed);
+    // Also skip when the utterance looks like a full order (quantities / "from" / corrections) so backend can parse it
+    const hasQuantityOrComplexForCategory = /\d/.test(trimmed)
+      || /\b(one|two|three|four|five|six|seven|eight|nine|ten|pieces?|bottle|bottles?|from|and|said|not)\b/i.test(trimmed);
+    const runCategoryFastPath = fromVoice && activeCategories.length > 0 && !switchRestaurantPhrase && !hasQuantityOrComplexForCategory;
+
+    // Category match only when no item match (voiceMatch.js: same logic as tests)
+    if (runCategoryFastPath) {
+      const matchedCat = matchCategory(activeCategories, trimmed);
+      console.log('%c[Voice match]', 'color: #0088ff; font-weight: bold', 'input:', JSON.stringify(trimmed), '| categories:', activeCategories.map(c => (typeof c.name === 'string' ? c.name : c.name?.name ?? c.name)));
+      trace('voice.fastPath.category.tried', { input: trimmed, categoryNames: activeCategories.map(c => (typeof c.name === 'string' ? c.name : c?.name?.name ?? c?.name ?? c)), matched: matchedCat?.name ?? null });
+      if (matchedCat) {
+        traceTiming('voice.fastPath.category.matched', t0, { category: matchedCat.name, id: matchedCat.id });
+        setActiveCategoryName(matchedCat.name);
+        if (voiceModeRef.current) voiceSpeakRef.current(`${matchedCat.name}. Which one would you like?`, true);
+        const catName = typeof matchedCat.name === 'string' ? matchedCat.name : (matchedCat.name?.name ?? 'Category');
+        const fetchT0 = performance.now();
+        fetchCategoryItems(matchedCat.id)
+          .then((items) => {
+            traceTiming('voice.fastPath.category.itemsLoaded', fetchT0, { count: Array.isArray(items) ? items.length : 0 });
+            const list = Array.isArray(items) ? items : [];
+            setCurrentItems(list);
+            setMessages((p) => [...p, { role: "bot", content: `${catName} — ${list.length} items`, items: list.length ? list : null }]);
+            setStatus("Ready.");
+          })
+          .catch((err) => {
+            traceError('voice.fastPath.category.fetchError', err);
+            setCurrentItems([]);
+            setMessages((p) => [...p, { role: "bot", content: `Couldn't load ${catName}. Try again.` }]);
+            setStatus("Ready.");
+          });
+        if (token) sendMessage(token, buildChatPayload(`category:${matchedCat.id}`)).then((res) => {
+          if (res.session_id) setSessionId(res.session_id);
+          if (res.items?.length) setCurrentItems(res.items);
+          if (res.categories?.length) setActiveCategories(res.categories);
+        }).catch(() => {});
+        setStatus("Loading...");
+        return;
+      }
+    }
+
+    if (fromVoice) traceTiming('voice.fastPath.skipped', t0, { activeCategories: activeCategories.length, currentItems: currentItems.length });
 
     // ── Intent Router ────────────────────────────────────────────────
     // Classify the message into an intent, then route accordingly.
@@ -610,13 +883,17 @@ export default function App() {
       if (cleanedText !== trimmed.toLowerCase()) {
         console.log(`%c[Validator] ✅ PASSED — cleaned: "${cleanedText}"`, 'color: #00ff88; font-weight: bold');
       }
+      traceTiming('voice.afterValidation', t0, { cleanedLen: cleanedText.length });
     }
 
     const skipIntentSearch = cleanedText.startsWith("#") || cleanedText.startsWith("add:") || cleanedText.length <= 2;
 
+    let intentResult = null;
     if (!skipIntentSearch) {
-      const { parseIntent, INTENTS, buildSearchQuery } = await import("./voice/IntentParser.js");
-      const { applyUpdate, buildQuery, describeFilters, resetForNewSearch } = await import("./voice/ConversationState.js");
+      const importT0 = performance.now();
+      const { parseIntent, buildSearchQuery, shouldBypassGlobalSearch, shouldUseDiscoverySearch } = await import("./voice/IntentParser.js");
+      const { applyUpdate, buildQuery, createState, describeFilters, resetForNewSearch } = await import("./voice/ConversationState.js");
+      traceTiming('voice.intentImport', importT0);
 
       // Combine partnered restaurants + nearby places (from Google) for matching
       const allRestaurants = [
@@ -626,7 +903,9 @@ export default function App() {
       console.log(`%c[IntentRouter] 📊 Available: ${restaurants.length} partnered + ${nearbyPlaces.length} nearby = ${allRestaurants.length} restaurants`, 'color: #888');
       if (allRestaurants.length > 0) console.log(`%c[IntentRouter] 🏪 Names: ${allRestaurants.map(r => r.name).join(', ')}`, 'color: #888; font-size: 10px');
 
-      const intentResult = parseIntent(cleanedText, convStateRef.current, allRestaurants);
+      const parseT0 = performance.now();
+      intentResult = parseIntent(cleanedText, convStateRef.current, allRestaurants);
+      traceTiming('voice.afterIntentParse', t0, { parseMs: Math.round(performance.now() - parseT0), intent: intentResult.intent });
       trace('intent.parsed', {
         intent: intentResult.intent,
         parseTimeMs: intentResult.parseTimeMs,
@@ -638,6 +917,41 @@ export default function App() {
       console.log(`%c[IntentRouter] 📝 Input: "${cleanedText}" | Entities:`, 'color: #aaa', intentResult.entities, '| StateUpdate:', intentResult.stateUpdate);
       if (intentResult.restaurantMatch) console.log(`%c[IntentRouter] 🏪 Restaurant match: "${intentResult.restaurantMatch.name}"`, 'color: #00ff88; font-weight: bold');
       console.log(`%c[IntentRouter] 💾 Conv state:`, 'color: #aaa', { ...convStateRef.current });
+
+      const executeDiscoverySearch = async ({ queryText, stateUpdate = null }) => {
+        if (stateUpdate) {
+          convStateRef.current = applyUpdate(createState(), stateUpdate);
+        }
+        convStateRef.current.lastQuery = queryText;
+
+        try {
+          const data = await searchByIntent(queryText);
+          if (data.results && data.results.length > 0) {
+            convStateRef.current.lastResults = data.results;
+            const count = data.results.length;
+            setMessages((p) => [...p, { role: "bot", content: `__PRICE_COMPARE__`, priceCompare: data }]);
+            setStatus("Ready.");
+            if (fromVoice && voiceModeRef.current) {
+              voiceSpeakRef.current(`Found ${count} options. Which one?`, true);
+            }
+            return true;
+          }
+
+          setMessages((p) => [...p, { role: "bot", content: "I couldn't find anything matching that. Try a dish name, cuisine, or say \"suggest something\"!" }]);
+          setStatus("Ready.");
+          if (fromVoice && voiceModeRef.current) {
+            voiceSpeakRef.current("I couldn't find anything. Try a different dish name.", true);
+          }
+          return true;
+        } catch {
+          setMessages((p) => [...p, { role: "bot", content: "Sorry, I had trouble processing that. Try again or ask for a specific dish!" }]);
+          setStatus("Ready.");
+          if (fromVoice && voiceModeRef.current) {
+            voiceSpeakRef.current("Network issue, try again.", true);
+          }
+          return true;
+        }
+      };
 
       // ── GREETING / HELP / THANKS / GOODBYE ──────────────────────
       if (intentResult.intent === INTENTS.GREETING) {
@@ -673,6 +987,8 @@ export default function App() {
       // When no restaurantMatch ("change restaurant", "different restaurant"), fall through to send to backend
       if (intentResult.intent === INTENTS.CHANGE_RESTAURANT && intentResult.restaurantMatch) {
         const matchedRest = resolvePartneredRestaurant(intentResult.restaurantMatch, restaurants);
+        const menuOnboardingMessage = buildMenuOnboardingMessage(matchedRest.name);
+        const menuOnboardingNotice = buildMenuOnboardingNotice(matchedRest.name);
         if (matchedRest.id == null || matchedRest.id === "" || Number.isNaN(Number(matchedRest.id))) {
           setMessages((p) => [
             ...p,
@@ -776,11 +1092,12 @@ export default function App() {
           // Still nothing — show reply from backend or generic message
           setMessages((p) => [...p, {
             role: "bot",
-            content: menuRes.reply || selectRes.reply || `Switched to **${matchedRest.name}**! Ask me what you'd like to order.`,
+            content: menuRes.reply || selectRes.reply || menuOnboardingMessage,
+            onboardingNotice: menuOnboardingNotice,
           }]);
           setStatus("Ready.");
           if (fromVoice && voiceModeRef.current) {
-            voiceSpeakRef.current(`Switched to ${matchedRest.name}. What would you like?`);
+            voiceSpeakRef.current(`The menu for ${matchedRest.name} is still being added. Please try another restaurant.`);
           }
           return;
         } catch (err) {
@@ -887,120 +1204,294 @@ export default function App() {
         return;
       }
 
+      // ── CLEAR CART ─────────────────────────────────────────────
+      if (intentResult.intent === INTENTS.CLEAR_CART) {
+        if (!token) {
+          const reply = "Please sign in first so I can manage your cart.";
+          setMessages((p) => [...p, { role: "bot", content: reply }]);
+          setStatus("Ready.");
+          if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("Please sign in first so I can manage your cart.", true);
+          return;
+        }
+
+        const hasCartItems = Boolean(cartData?.restaurants?.some((group) => (group.items || []).length > 0));
+        if (!hasCartItems) {
+          const reply = "Your cart is already empty.";
+          setMessages((p) => [...p, { role: "bot", content: reply }]);
+          setStatus("Ready.");
+          if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("Your cart is already empty.", true);
+          return;
+        }
+
+        try {
+          const clearedCart = await clearCart(token);
+          setCartData(clearedCart);
+          setShowCartPanel(false);
+          lastVoiceCartItemRef.current = null;
+          const reply = "Cart cleared. Start a fresh order anytime.";
+          setMessages((p) => [...p, { role: "bot", content: reply }]);
+          setStatus("Ready.");
+          if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("Cart cleared. Start a fresh order anytime.", true);
+          return;
+        } catch (err) {
+          console.error("[Cart] clearCart failed:", err);
+          const reply = "I couldn't clear the cart right now. Please try again.";
+          setMessages((p) => [...p, { role: "bot", content: reply }]);
+          setStatus("Ready.");
+          if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("I couldn't clear the cart right now. Please try again.", true);
+          return;
+        }
+      }
+
       // ── NEW SEARCH ─────────────────────────────────────────────
       // Only do global search when no restaurant is selected AND no active categories
       // If restaurant IS selected or categories are active, fall through to process_message
-      if (intentResult.intent === INTENTS.NEW_SEARCH && !selectedRestaurant && activeCategories.length === 0) {
-        // Reset state with new search filters
-        const { createState } = await import("./voice/ConversationState.js");
-        convStateRef.current = applyUpdate(createState(), intentResult.stateUpdate);
-        convStateRef.current.lastQuery = trimmed;
+      const queryRoute = decideAppQueryRoute({
+        text: cleanedText,
+        intentResult,
+        selectedRestaurant,
+        activeCategories,
+        restaurants: allRestaurants,
+        fromVoice,
+      });
 
-        try {
-          const data = await searchByIntent(trimmed);
-          if (data.results && data.results.length > 0) {
-            convStateRef.current.lastResults = data.results;
-            const topItem = data.results[0]?.name || 'food';
-            const count = data.results.length;
-            setMessages((p) => [...p, { role: "bot", content: `__PRICE_COMPARE__`, priceCompare: data }]);
-            setStatus("Ready.");
-            if (fromVoice && voiceModeRef.current) {
-              voiceSpeakRef.current(`Found ${count} options. Which one?`, true);
-            }
-            return;
-          }
-          setMessages((p) => [...p, { role: "bot", content: "I couldn't find anything matching that. Try a dish name, cuisine, or say \"suggest something\"!" }]);
-          setStatus("Ready.");
-          if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("I couldn't find anything. Try a different dish name.", true);
-          return;
-        } catch {
-          setMessages((p) => [...p, { role: "bot", content: "Sorry, I had trouble processing that. Try again or ask for a specific dish!" }]);
-          setStatus("Ready.");
-          if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("Network issue, try again.", true);
+      if (intentResult.intent === INTENTS.NEW_SEARCH && !selectedRestaurant && activeCategories.length === 0) {
+        if (queryRoute !== APP_QUERY_ROUTES.DISCOVERY_SEARCH) {
+          console.log('%c[IntentRouter] ↩️ Mixed-language or restaurant-directed food query — bypassing price comparison and sending to backend', 'color: #ffaa00; font-weight: bold');
+        } else {
+          await executeDiscoverySearch({ queryText: fromVoice ? cleanedText : trimmed, stateUpdate: intentResult.stateUpdate });
           return;
         }
       }
 
       // If restaurant is selected or categories are active, check for category match FIRST
-      if (selectedRestaurant || activeCategories.length > 0) {
-        // ── Client-side category matching (instant, no backend) ──────
-        // Skip when input is more specific than a category name (e.g. "iced coffee" → item, not category "Coffee")
+      // Skip for MULTI_ORDER — backend must handle cross-restaurant orders without a single restaurant_id constraint
+      if ((selectedRestaurant || activeCategories.length > 0) && intentResult.intent !== INTENTS.MULTI_ORDER) {
+        traceTiming('voice.slowPath.categoryCheck', t0, { fromVoice, activeCategories: activeCategories.length });
+        const selectedContextSuggestionRequest = isSelectedRestaurantSuggestionRequest((fromVoice ? cleanedText : trimmed), intentResult);
+
+        if (selectedContextSuggestionRequest) {
+          if (currentItems.length > 0) {
+            const suggestedItems = rankContextSuggestionItems(currentItems, intentResult);
+            const categoryLabel = activeCategoryName || selectedRestaurant?.name || "this menu";
+            const prefix = intentResult?.entities?.spice === "spicy" ? "Here are some spicy options" : "Here are some options";
+            setCurrentItems(suggestedItems);
+            setMessages((p) => [...p, {
+              role: "bot",
+              content: `${prefix} from ${categoryLabel}. Tap + to add or tell me which one you want.`,
+              items: suggestedItems,
+            }]);
+            setStatus("Ready.");
+            if (fromVoice && voiceModeRef.current) {
+              voiceSpeakRef.current(`${prefix}. Tell me which one you want.`, true);
+            }
+            return;
+          }
+
+          if (activeCategories.length > 0) {
+            const catNames = activeCategories.map((c) => (typeof c.name === "string" ? c.name : c?.name?.name ?? c?.name ?? "")).filter(Boolean);
+            setMessages((p) => [...p, {
+              role: "bot",
+              content: `Pick a category and I will show you some options: ${catNames.join(", ")}`,
+              categories: activeCategories,
+            }]);
+            setStatus("Ready.");
+            if (fromVoice && voiceModeRef.current) {
+              voiceSpeakRef.current("Pick a category and I will show you some options.", true);
+            }
+            return;
+          }
+        }
+
+        if (selectedRestaurant && queryRoute === APP_QUERY_ROUTES.BROWSE_CATEGORIES && activeCategories.length === 0) {
+          setStatus("Loading menu...");
+
+          const apiBase = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || "http://localhost:8000");
+
+          try {
+            const categoryResponse = await fetch(`${apiBase}/restaurants/${selectedRestaurant.id}/categories`);
+            const categories = categoryResponse.ok ? await categoryResponse.json() : [];
+
+            if (categories && categories.length > 0) {
+              const catNames = categories.map((c) => (typeof c.name === "string" ? c.name : c?.name?.name ?? c?.name ?? "")).filter(Boolean);
+              setActiveCategories(categories);
+              setActiveCategoryName(null);
+              setCurrentItems([]);
+              setMessages((p) => [...p, {
+                role: "bot",
+                content: `Browse a category: ${catNames.join(", ")}`,
+                categories,
+              }]);
+              setStatus("Ready.");
+              if (fromVoice && voiceModeRef.current) {
+                voiceSpeakRef.current("Here are the menu categories. Pick one to continue.", true);
+              }
+              return;
+            }
+          } catch (_) {
+            // Fall back to chat-based menu loading below.
+          }
+
+          if (token) {
+            try {
+              const menuRes = await sendMessage(token, buildChatPayload('show menu'));
+              if (menuRes.session_id) setSessionId(menuRes.session_id);
+              if (menuRes.categories && menuRes.categories.length > 0) {
+                setActiveCategories(menuRes.categories);
+                setActiveCategoryName(null);
+                setCurrentItems([]);
+                setMessages((p) => [...p, {
+                  role: "bot",
+                  content: menuRes.reply,
+                  categories: menuRes.categories,
+                }]);
+                setStatus("Ready.");
+                if (fromVoice && voiceModeRef.current) {
+                  voiceSpeakRef.current("Here are the menu categories. Pick one to continue.", true);
+                }
+                return;
+              }
+            } catch (_) {
+              // Fall through to normal backend handling.
+            }
+          }
+
+          setStatus("Ready.");
+        }
+
+        // ── Client-side category matching (voiceMatch.js); skip if user said "change restaurant to X" or full multi-order ──────
         if (activeCategories.length > 0) {
           const rawInput = (fromVoice ? cleanedText : trimmed).trim();
-          const inputLower = rawInput.toLowerCase().replace(/\s+/g, '');
-          const inputWords = rawInput.split(/\s+/).length;
-          // Extract possible category phrase: "go to the appetizers" → "appetizers", "show me coffee" → "coffee"
-          const goToPrefixes = /^(?:go\s+to\s+(?:the\s+)?|show\s+me\s+(?:the\s+)?|take\s+me\s+to\s+(?:the\s+)?|switch\s+to\s+(?:the\s+)?|i\s+want\s+(?:the\s+)?|open\s+(?:the\s+)?)\s*/i;
-          const categoryPhrase = rawInput.replace(goToPrefixes, '').trim();
-          const phraseLower = categoryPhrase.toLowerCase().replace(/\s+/g, '');
-          const phraseWords = categoryPhrase.split(/\s+/).length;
-          const candidates = [
-            { lower: inputLower, words: inputWords },
-            ...(phraseLower && phraseLower !== inputLower ? [{ lower: phraseLower, words: phraseWords }] : []),
-          ];
-          let matchedCat = null;
-          for (const { lower: tryLower, words: tryWords } of candidates) {
-            matchedCat = activeCategories.find(cat => {
-              const catLower = (typeof cat.name === 'string' ? cat.name : cat).toLowerCase().replace(/\s+/g, '');
-              const catWords = (typeof cat.name === 'string' ? cat.name : cat).trim().split(/\s+/).length;
-              if (tryWords > catWords || tryLower.length > catLower.length + 3) return false;
-              return catLower === tryLower
-                || catLower.startsWith(tryLower)
-                || tryLower.startsWith(catLower)
-                || (catLower.includes(tryLower) && tryLower.length >= catLower.length - 2);
-            });
-            if (matchedCat) break;
-          }
+          const isSwitchRestaurant = /^(?:change|switch|go\s+to|take\s+me\s+to)\s+(?:the\s+)?(?:restaurant\s+to\s+)?(.+)$/i.test(rawInput)
+            || /^(?:the\s+)?restaurant\s+to\s+(.+)$/i.test(rawInput);
+          const hasQtyOrComplexCat = /\d/.test(rawInput)
+            || /\b(one|two|three|four|five|six|seven|eight|nine|ten|pieces?|bottle|bottles?|from|and|said|not)\b/i.test(rawInput);
+          const matchedCat = (!isSwitchRestaurant && !hasQtyOrComplexCat) ? matchCategory(activeCategories, rawInput) : null;
+          trace('voice.slowPath.category.tried', { input: rawInput, categoryNames: activeCategories.map(c => (typeof c.name === 'string' ? c.name : c?.name?.name ?? c?.name ?? c)), matched: matchedCat?.name ?? null });
           if (matchedCat) {
+            traceTiming('voice.slowPath.category.matched', t0, { category: matchedCat.name });
             console.log(`%c[CategoryMatch] ✅ "${fromVoice ? cleanedText : trimmed}" → category "${matchedCat.name}" (id: ${matchedCat.id})`, 'color: #00ff88; font-weight: bold');
             setActiveCategoryName(matchedCat.name);
-            // Pre-fetch TTS in parallel with backend call (we know the text ahead of time)
             if (fromVoice && voiceModeRef.current) {
               voiceSpeakRef.current(`${matchedCat.name}. Which one would you like?`, true);
             }
+            const catName = typeof matchedCat.name === 'string' ? matchedCat.name : (matchedCat.name?.name ?? 'Category');
+            const fetchT0 = performance.now();
+            fetchCategoryItems(matchedCat.id)
+              .then((items) => {
+                traceTiming('voice.slowPath.category.itemsLoaded', fetchT0, { count: Array.isArray(items) ? items.length : 0 });
+                const list = Array.isArray(items) ? items : [];
+                setCurrentItems(list);
+                setMessages((p) => [...p, {
+                  role: "bot",
+                  content: `${catName} — ${list.length} items`,
+                  items: list.length ? list : null,
+                }]);
+                setStatus("Ready.");
+              })
+              .catch((err) => {
+                console.error('[CategoryMatch] fetchCategoryItems failed:', err);
+                setCurrentItems([]);
+                setMessages((p) => [...p, { role: "bot", content: `Couldn't load ${catName}. Try again.` }]);
+                setStatus("Ready.");
+              });
+            if (token) {
+              sendMessage(token, buildChatPayload(`category:${matchedCat.id}`))
+                .then((res) => {
+                  if (res.session_id) setSessionId(res.session_id);
+                  if (res.items && res.items.length > 0) setCurrentItems(res.items);
+                  if (res.categories && res.categories.length > 0) setActiveCategories(res.categories);
+                })
+                .catch(() => {});
+            }
+            setStatus("Loading...");
+            return;
+          }
+
+          if (queryRoute === APP_QUERY_ROUTES.BROWSE_CATEGORIES) {
+            const catNames = activeCategories.map((c) => (typeof c.name === "string" ? c.name : c?.name?.name ?? c?.name ?? "")).filter(Boolean);
+            setMessages((p) => [...p, {
+              role: "bot",
+              content: `Browse a category: ${catNames.join(", ")}`,
+              categories: activeCategories,
+            }]);
+            setStatus("Ready.");
+            if (fromVoice && voiceModeRef.current) {
+              voiceSpeakRef.current("Here are the menu categories. Pick one to continue.", true);
+            }
+            return;
+          }
+        }
+
+        // ── Voice: local item match when menu is already displayed (voiceMatch.js) ──────
+        // Only for simple, quantity-free utterances; anything with numbers or corrections goes to backend.
+        const hasQtyOrComplex = /\d/.test(cleanedText)
+          || /\b(one|two|three|four|five|six|seven|eight|nine|ten|pieces?|bottle|bottles?|from|said|not)\b/i.test(cleanedText);
+        if (fromVoice && !hasQtyOrComplex && currentItems.length > 0 && selectedRestaurant && token) {
+          const matchedItem = matchItem(currentItems, cleanedText);
+          trace('voice.slowPath.item.tried', { input: cleanedText, matched: matchedItem?.name ?? null });
+          if (matchedItem) {
+            console.log(`%c[ItemMatch] ✅ Voice "${cleanedText}" → item "${matchedItem.name}" (id: ${matchedItem.id})`, 'color: #00ff88; font-weight: bold');
+            if (voiceModeRef.current) voiceSpeakRef.current(`Added ${matchedItem.name}.`, true);
             try {
-              const res = await sendMessage(token, buildChatPayload(`category:${matchedCat.id}`));
-              setSessionId(res.session_id);
-              if (res.items && res.items.length > 0) setCurrentItems(res.items);
-              if (res.categories && res.categories.length > 0) setActiveCategories(res.categories);
-              setMessages((p) => [...p, {
-                role: "bot",
-                content: res.reply || `${matchedCat.name} — ${res.items?.length || 0} items`,
-                items: res.items,
-              }]);
+              const res = await sendMessage(token, buildChatPayload(`add:${matchedItem.id}:1`));
+              if (res.session_id) setSessionId(res.session_id);
+              if (res.cart_summary) {
+                setCartData(res.cart_summary);
+                const groups = res.cart_summary.restaurants || [];
+                let last = null;
+                groups.forEach((g) => {
+                  (g.items || []).forEach((it) => {
+                    last = { order_item_id: it.order_item_id, name: it.name };
+                  });
+                });
+                if (last) lastVoiceCartItemRef.current = last;
+              }
+              setMessages((p) => [...p, { role: "bot", content: res.reply || `Added **${matchedItem.name}** to cart.` }]);
               setStatus("Ready.");
+              setTimeout(() => fetchCart(token).then((c) => {
+                setCartData(c);
+                const groups = c?.restaurants || [];
+                let last = null;
+                groups.forEach((g) => {
+                  (g.items || []).forEach((it) => {
+                    last = { order_item_id: it.order_item_id, name: it.name };
+                  });
+                });
+                if (last) lastVoiceCartItemRef.current = last;
+              }).catch(() => {}), 300);
               return;
             } catch (err) {
-              console.error('[CategoryMatch] ❌ Failed:', err);
+              console.error('[ItemMatch] sendMessage add failed:', err);
+              if (voiceModeRef.current) voiceSpeakRef.current("Couldn't add. Try again.", true);
             }
           }
         }
+        traceTiming('voice.slowPath.fallthroughToBackend', t0);
         console.log(`%c[IntentRouter] ➡️ Restaurant selected — sending to process_message`, 'color: #00bbff; font-weight: bold');
         // Don't return — fall through to process_message below
       }
 
       // ── UNCLEAR but no restaurant selected ──────────────────────
       if (!selectedRestaurant && intentResult.intent === INTENTS.UNCLEAR) {
-        // For voice: don't do global search on unclear/garbled input — it returns random results
-        if (fromVoice) {
-          console.log('%c[IntentRouter] ⚠️ UNCLEAR voice input — asking to retry (no global search)', 'color: #ffaa00; font-weight: bold');
-          setMessages((p) => [...p, { role: "bot", content: "I didn't quite get that. Try saying a dish name like \"biryani\" or a restaurant name." }]);
-          setStatus("Ready.");
-          if (voiceModeRef.current) voiceSpeakRef.current("I didn't quite get that. Try saying a dish name or restaurant name.", true);
-          return;
-        }
-        // For text: try searchByIntent as fallback
-        try {
-          const data = await searchByIntent(cleanedText);
-          if (data.results && data.results.length > 0) {
-            convStateRef.current.lastQuery = cleanedText;
-            convStateRef.current.lastResults = data.results;
-            setMessages((p) => [...p, { role: "bot", content: `__PRICE_COMPARE__`, priceCompare: data }]);
-            setStatus("Ready.");
+        if (queryRoute === APP_QUERY_ROUTES.BACKEND && shouldBypassGlobalSearch(cleanedText, intentResult, allRestaurants)) {
+          console.log('%c[IntentRouter] ↩️ UNCLEAR but order-like mixed-language query — sending to backend', 'color: #ffaa00; font-weight: bold');
+        } else {
+          if (queryRoute === APP_QUERY_ROUTES.DISCOVERY_SEARCH) {
+            console.log('%c[IntentRouter] 🔎 UNCLEAR but discovery-style query — showing suggestion options', 'color: #ffaa00; font-weight: bold');
+            await executeDiscoverySearch({ queryText: fromVoice ? cleanedText : trimmed });
             return;
           }
-        } catch { }
-        // Fall through to process_message
+          // For voice: don't do global search on other unclear/garbled input — it returns random results
+          if (queryRoute === APP_QUERY_ROUTES.RETRY_UNCLEAR) {
+            console.log('%c[IntentRouter] ⚠️ UNCLEAR voice input — asking to retry (no global search)', 'color: #ffaa00; font-weight: bold');
+            setMessages((p) => [...p, { role: "bot", content: "I didn't quite get that. Try saying a dish name like \"biryani\" or a restaurant name." }]);
+            setStatus("Ready.");
+            if (voiceModeRef.current) voiceSpeakRef.current("I didn't quite get that. Try saying a dish name or restaurant name.", true);
+            return;
+          }
+          // Fall through to process_message
+        }
       }
     }
 
@@ -1032,10 +1523,23 @@ export default function App() {
 
     try {
       const textToSend = fromVoice ? cleanedText : text.trim();
-      const payload = buildChatPayload(textToSend);
+      // MULTI_ORDER: omit restaurant_id so backend handles cross-restaurant ordering freely
+      const isMultiOrder = intentResult?.intent === INTENTS.MULTI_ORDER;
+      const payload = isMultiOrder
+        ? {
+            session_id: sessionId,
+            text: textToSend,
+            restaurant_id: null,
+            ...(Number.isFinite(userLat) && Number.isFinite(userLng) ? { lat: userLat, lng: userLng } : {}),
+          }
+        : buildChatPayload(textToSend);
+      if (isMultiOrder) console.log('%c[IntentRouter] 🍽️ MULTI_ORDER → backend without restaurant_id constraint', 'color: #ff6600; font-weight: bold');
+      traceTiming('voice.backend.sendStart', t0, { textLen: textToSend.length });
       trace('backend.send', { textToSend, session_id: payload.session_id });
       console.log(`%c[Backend] 📤 process_message("${textToSend}")`, 'color: #bb88ff; font-weight: bold');
+      const backendT0 = performance.now();
       const res = await sendMessage(token, payload);
+      traceTiming('voice.backend.response', backendT0, { replyLen: res?.reply?.length ?? 0 });
       trace('backend.response', {
         session_id: res.session_id,
         restaurant_id: res.restaurant_id,
@@ -1133,6 +1637,7 @@ export default function App() {
   const handleSend = (e) => { e.preventDefault(); doSend(messageText); };
   const handleCategoryClick = async (cat) => {
     setActiveCategoryName(cat.name);
+    setCurrentItems([]);
     setStatus("Loading...");
     // Always load menu items via REST so the list shows regardless of chat session state
     try {
@@ -1141,7 +1646,7 @@ export default function App() {
       setCurrentItems(list);
       if (token) {
         // Logged in: also notify chat for cart/session; reply will append in doSend
-        doSend(`category:${cat.id}`);
+        doSend(`category:${cat.id}`, false, 0, { preserveComposerText: true, skipUserEcho: true });
       } else {
         setMessages((p) => [...p, {
           role: "bot",
@@ -1152,7 +1657,7 @@ export default function App() {
     } catch (err) {
       setCurrentItems([]);
       setMessages((p) => [...p, { role: "bot", content: "Couldn't load this category. Try again or sign in." }]);
-      if (token) doSend(`category:${cat.id}`);
+      if (token) doSend(`category:${cat.id}`, false, 0, { preserveComposerText: true, skipUserEcho: true });
     }
     setStatus("Ready.");
   };
@@ -1188,6 +1693,8 @@ export default function App() {
     setStatus("Loading menu...");
 
     const apiBase = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || "http://localhost:8000");
+    const menuOnboardingMessage = buildMenuOnboardingMessage(resolved.name);
+    const menuOnboardingNotice = buildMenuOnboardingNotice(resolved.name);
 
     // Fire both in parallel: fast categories REST + session setup via process_message
     const catPromise = fetch(`${apiBase}/restaurants/${resolved.id}/categories`)
@@ -1208,56 +1715,99 @@ export default function App() {
     const sessionRes = await sessionPromise;
     if (sessionRes) {
       if (sessionRes.session_id) setSessionId(sessionRes.session_id);
-      // Show welcome message but DON'T override categories (pre-fetch is authoritative)
-      const welcomeText = sessionRes.reply || `Welcome to **${resolved.name}**! Pick a category or just tell me what you want.`;
-      setMessages((p) => [...p, { role: "bot", content: welcomeText }]);
       // If pre-fetch returned nothing, fall back to backend categories
       if ((!cats || cats.length === 0) && sessionRes.categories && sessionRes.categories.length > 0) {
+        const welcomeText = sessionRes.reply || `Welcome to **${resolved.name}**! Pick a category or just tell me what you want.`;
+        setMessages((p) => [...p, { role: "bot", content: welcomeText }]);
         setActiveCategories(sessionRes.categories);
+      } else if ((!cats || cats.length === 0) && (!sessionRes.categories || sessionRes.categories.length === 0)) {
+        setMessages((p) => [...p, { role: "bot", content: menuOnboardingMessage, onboardingNotice: menuOnboardingNotice }]);
+      } else {
+        const welcomeText = sessionRes.reply || `Welcome to **${resolved.name}**! Pick a category or just tell me what you want.`;
+        setMessages((p) => [...p, { role: "bot", content: welcomeText }]);
       }
     } else {
       // No token or backend error — still show categories from pre-fetch
-      setMessages((p) => [...p, { role: "bot", content: `Welcome to **${resolved.name}**! Pick a category or just tell me what you want.` }]);
+      if (cats && cats.length > 0) {
+        setMessages((p) => [...p, { role: "bot", content: `Welcome to **${resolved.name}**! Pick a category or just tell me what you want.` }]);
+      } else {
+        setMessages((p) => [...p, { role: "bot", content: menuOnboardingMessage, onboardingNotice: menuOnboardingNotice }]);
+      }
     }
     setStatus("Ready.");
   };
 
   const handleInputChange = (e) => {
-    const val = e.target.value;
-    setMessageText(val);
-    if (val.startsWith("#")) {
-      const q = val.slice(1).toLowerCase();
-      const partnered = restaurants.filter(
-        (r) => r.name.toLowerCase().includes(q) || r.slug.toLowerCase().includes(q)
-      ).map((r) => ({ ...r, partnered: true }));
-      const partneredNorms = new Set(partnered.map((p) => normRestName(p.name)));
-      const nearby = nearbyPlaces
-        .filter((r) => r.name.toLowerCase().includes(q))
-        .filter((r) => {
-          const nn = normRestName(r.name);
-          for (const pn of partneredNorms) {
-            if (pn === nn || pn.includes(nn) || nn.includes(pn)) return false;
-          }
-          return true;
-        })
-        .map((r) => ({
-          ...r,
-          slug: r.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
-          partnered: false,
-        }));
-      const combined = [...partnered, ...nearby];
-      setFilteredRestaurants(combined);
-      setShowSuggestions(combined.length > 0);
-      setSelectedIndex(0);
-    } else { setShowSuggestions(false); }
+    updateComposerText(e.target.value);
+  };
+
+  useEffect(() => {
+    const composer = inputRef.current;
+    if (!composer) return;
+    composer.style.height = "auto";
+    composer.style.height = `${Math.min(composer.scrollHeight, 132)}px`;
+  }, [messageText]);
+
+  useEffect(() => {
+    if (!activeCategoryName || !categoryStripRef.current) return;
+    const activeChip = categoryStripRef.current.querySelector('[data-active-category="true"]');
+    if (!activeChip) return;
+    activeChip.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+  }, [activeCategoryName, activeCategories]);
+
+  const updateCategoryNav = useCallback(() => {
+    const el = categoryStripRef.current;
+    if (!el) return;
+    const maxScrollLeft = Math.max(el.scrollWidth - el.clientWidth, 0);
+    setCategoryNav({
+      canScrollLeft: el.scrollLeft > 8,
+      canScrollRight: el.scrollLeft < maxScrollLeft - 8,
+    });
+  }, []);
+
+  useEffect(() => {
+    updateCategoryNav();
+    const el = categoryStripRef.current;
+    if (!el) return;
+
+    const handleScroll = () => updateCategoryNav();
+    el.addEventListener("scroll", handleScroll, { passive: true });
+    window.addEventListener("resize", handleScroll);
+
+    return () => {
+      el.removeEventListener("scroll", handleScroll);
+      window.removeEventListener("resize", handleScroll);
+    };
+  }, [activeCategories, updateCategoryNav]);
+
+  const scrollCategoryStrip = (direction) => {
+    const el = categoryStripRef.current;
+    if (!el) return;
+    el.scrollBy({ left: direction * 220, behavior: "smooth" });
   };
 
   const handleKeyDown = (e) => {
-    if (!showSuggestions) { if (e.key === "Enter") { e.preventDefault(); handleSend(e); } return; }
+    if (!showSuggestions) {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        handleSend(e);
+      }
+      return;
+    }
     if (e.key === "ArrowDown") { e.preventDefault(); setSelectedIndex((i) => (i + 1) % filteredRestaurants.length); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setSelectedIndex((i) => (i - 1 + filteredRestaurants.length) % filteredRestaurants.length); }
     else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); if (filteredRestaurants[selectedIndex]) selectRestaurant(filteredRestaurants[selectedIndex]); }
     else if (e.key === "Escape") setShowSuggestions(false);
+  };
+
+  const handleMicClick = () => {
+    if (voiceState === "processing") return;
+    if (voiceState === "listening") {
+      voice.stopDictation?.();
+      return;
+    }
+    composerDraftBeforeVoiceRef.current = messageText;
+    voice.startDictation?.();
   };
 
   // ===================== AUTH =====================
@@ -1323,6 +1873,25 @@ export default function App() {
 
   const cartItemCount = cartData?.restaurants?.reduce((t, g) => t + g.items.reduce((s, i) => s + i.quantity, 0), 0) || 0;
   const cartTotal = cartData?.grand_total_cents ? (cartData.grand_total_cents / 100).toFixed(2) : "0.00";
+  const cartPreviewGroup = cartData?.restaurants?.length ? cartData.restaurants[cartData.restaurants.length - 1] : null;
+  const cartPreviewItems = cartPreviewGroup?.items?.slice(-3) || [];
+  const cartPreviewExtraCount = Math.max((cartPreviewGroup?.items?.length || 0) - cartPreviewItems.length, 0);
+
+  const micButtonStateClass = voiceState === "listening"
+    ? "recording"
+    : voiceState === "processing"
+      ? "processing"
+      : "idle";
+  const micButtonIcon = voiceState === "listening"
+    ? "■"
+    : voiceState === "processing"
+      ? "⏳"
+      : "🎤";
+  const voiceHelperText = voiceState === "listening"
+    ? (voiceLanguage === "ta" ? "இப்போது பேசுங்கள். உங்கள் குரல் உடனே உரையாக மாறும். விரைவாக முடிக்க மீண்டும் தட்டலாம்." : "Speak naturally. Your voice is turning into text as you talk. Tap again only if you want to finish early.")
+    : voiceState === "processing"
+      ? (voiceLanguage === "ta" ? "குரல் உரையாக மாற்றப்படுகிறது..." : "Converting your voice to text...")
+      : (voiceLanguage === "ta" ? "🎤 மைக்கை தட்டி பேசுங்கள். நீங்கள் பேசும் போதே உரையாக வரும். பார்த்து அனுப்புங்கள்." : "Tap the mic and speak. We will turn your voice into text while you talk, then you can review and send.");
 
   const activeOrders = myOrders.filter(o => !['completed', 'rejected'].includes(o.status) || (Date.now() - new Date(o.created_at).getTime() < 3600000));
   const completedOrders = myOrders.filter(o => ['completed'].includes(o.status) && (Date.now() - new Date(o.created_at).getTime() >= 3600000));
@@ -1478,6 +2047,17 @@ export default function App() {
               </div>
             </motion.div>
 
+            {/* Restaurants load error */}
+            {restaurantsError && restaurants.length === 0 && (
+              <div className="menu-empty" style={{ marginTop: 24 }}>
+                <div className="menu-empty-emoji">⚠️</div>
+                <div className="menu-empty-text">{restaurantsError}</div>
+                <button className="optimizer-fab" style={{ marginTop: 12 }} onClick={loadRestaurants}>
+                  Retry
+                </button>
+              </div>
+            )}
+
             {/* All Restaurants Grid */}
             {restaurants.length > 0 && (
               <>
@@ -1585,30 +2165,91 @@ export default function App() {
                   )}
                 </div>
 
+                {cartPreviewGroup && (
+                  <button className="chat-cart-preview" onClick={() => setShowCartPanel(true)}>
+                    <div className="chat-cart-preview-top">
+                      <span className="chat-cart-preview-eyebrow">Current order</span>
+                      <span className="chat-cart-preview-total">${cartTotal}</span>
+                    </div>
+                    <div className="chat-cart-preview-restaurant">{cartPreviewGroup.restaurant_name}</div>
+                    <div className="chat-cart-preview-items">
+                      {cartPreviewItems.map((item) => (
+                        <span key={item.order_item_id || `${item.name}-${item.quantity}`} className="chat-cart-preview-chip">
+                          {item.quantity}x {item.name}
+                        </span>
+                      ))}
+                      {cartPreviewExtraCount > 0 && (
+                        <span className="chat-cart-preview-chip more">+{cartPreviewExtraCount} more</span>
+                      )}
+                    </div>
+                    <div className="chat-cart-preview-foot">Open cart to review or edit</div>
+                  </button>
+                )}
+
                 {/* Category Pills */}
                 {activeCategories.length > 0 && (
-                  <div className="category-pills">
-                    {activeCategories.map((cat) => {
-                      const catImg = getFoodItemImage(cat.name);
-                      return (
-                        <button key={cat.id}
-                          className={`cat-pill ${activeCategoryName === cat.name ? "active" : ""}`}
-                          onClick={() => handleCategoryClick(cat)}>
-                          {catImg ? (
-                            <img src={catImg} alt="" className="cat-thumb" />
-                          ) : (
-                            <span className="cat-emoji">{getFoodEmoji(cat.name)}</span>
-                          )}
-                          {cat.name}
-                          <span className="cat-count">{cat.item_count}</span>
-                        </button>
-                      );
-                    })}
+                  <div className="menu-browser-shell">
+                    <div className="menu-browser-header">
+                      <div>
+                        <div className="menu-browser-eyebrow">Browse menu</div>
+                        <div className="menu-browser-title">{activeCategoryName || "Choose a category"}</div>
+                      </div>
+                      <div className="menu-browser-meta">{activeCategories.length} categories</div>
+                    </div>
+                    <div className="category-pills-nav">
+                      <button
+                        type="button"
+                        className={`category-nav-btn ${categoryNav.canScrollLeft ? "enabled" : "disabled"}`}
+                        onClick={() => scrollCategoryStrip(-1)}
+                        disabled={!categoryNav.canScrollLeft}
+                        aria-label="Show previous categories"
+                      >
+                        ‹
+                      </button>
+                      <div className="category-pills-wrap" ref={categoryStripRef}>
+                        <div className="category-pills">
+                          {activeCategories.map((cat) => {
+                            const catImg = getFoodItemImage(cat.name);
+                            return (
+                              <button key={cat.id}
+                                data-active-category={activeCategoryName === cat.name ? "true" : "false"}
+                                className={`cat-pill ${activeCategoryName === cat.name ? "active" : ""}`}
+                                onClick={() => handleCategoryClick(cat)}>
+                                {catImg ? (
+                                  <img src={catImg} alt="" className="cat-thumb" />
+                                ) : (
+                                  <span className="cat-emoji">{getFoodEmoji(cat.name)}</span>
+                                )}
+                                <span className="cat-label">{cat.name}</span>
+                                <span className="cat-count">{cat.item_count}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className={`category-nav-btn ${categoryNav.canScrollRight ? "enabled" : "disabled"}`}
+                        onClick={() => scrollCategoryStrip(1)}
+                        disabled={!categoryNav.canScrollRight}
+                        aria-label="Show more categories"
+                      >
+                        ›
+                      </button>
+                    </div>
                   </div>
                 )}
 
                 {/* Menu Items */}
                 <div className="menu-area">
+                  {activeCategoryName && currentItems.length > 0 && (
+                    <div className="menu-area-header">
+                      <div>
+                        <div className="menu-area-title">{activeCategoryName}</div>
+                        <div className="menu-area-subtitle">{currentItems.length} items ready to add</div>
+                      </div>
+                    </div>
+                  )}
                   {currentItems.length > 0 ? (
                     currentItems.map((item, ii) => (
                       <motion.div key={item.id} className="menu-item"
@@ -1818,7 +2459,19 @@ export default function App() {
                     return (
                       <div className="ai-message">
                         <div className="ai-avatar">✨</div>
-                        <div className="ai-bubble">{renderContent(lastBot.content)}</div>
+                        <div className={`ai-bubble ${lastBot.onboardingNotice ? "ai-bubble-onboarding" : ""}`}>
+                          {lastBot.onboardingNotice ? (
+                            <div className="onboarding-notice-card">
+                              <div className="onboarding-notice-eyebrow">{lastBot.onboardingNotice.eyebrow}</div>
+                              <div className="onboarding-notice-title">{lastBot.onboardingNotice.title}</div>
+                              <div className="onboarding-notice-body">{lastBot.onboardingNotice.body}</div>
+                              <div className="onboarding-notice-meta">
+                                <span className="onboarding-notice-restaurant">{lastBot.onboardingNotice.restaurantName}</span>
+                                <span className="onboarding-notice-hint">{lastBot.onboardingNotice.hint}</span>
+                              </div>
+                            </div>
+                          ) : renderContent(lastBot.content)}
+                        </div>
                       </div>
                     );
                   })()}
@@ -1851,23 +2504,35 @@ export default function App() {
                     <div className="voice-status-bar">
                       <div className={`voice-dot ${voiceState}`} />
                       <span className="voice-status-text">
-                        {voiceState === "speaking" ? "🔊 Speaking..." : voiceState === "listening" ? "🎙️ Listening..." : voiceState === "processing" ? "⏳ Processing..." : "🎤 Voice On"}
+                        {voiceState === "speaking" ? "🔊 Speaking..." : voiceState === "listening" ? "Listening... speech is appearing as text" : voiceState === "processing" ? "⏳ Converting to text..." : "🎤 Voice On"}
                       </span>
-                      {liveTranscript && <span className="voice-live" style={{ color: "#aef", fontStyle: "italic", marginLeft: 6, fontSize: "0.85em" }}>{liveTranscript}</span>}
-                      <button className="voice-end-btn" onClick={toggleVoiceMode}>✕</button>
+                      {liveTranscript && <span className="voice-live">{liveTranscript}</span>}
+                      <button className="voice-end-btn" onClick={stopVoiceSession}>✕</button>
                     </div>
                   )}
 
                   {/* Input */}
-                  <form onSubmit={handleSend} className="ai-chat-input-row" style={{ position: 'relative' }}>
-                    <input ref={inputRef} className="ai-chat-input" value={messageText}
-                      onChange={handleInputChange} onKeyDown={handleKeyDown}
-                      placeholder={voiceMode ? (voiceLanguage === "ta" ? "பேசுங்கள் அல்லது தட்டச்சு செய்யுங்கள்..." : "Voice active — speak or type...") : "Type # for restaurants, or ask anything..."} />
-                    <button type="button" className={`mic-btn ${voiceMode ? "voice-active" : ""}`} onClick={toggleVoiceMode}
-                      title={voiceMode ? "End voice mode" : "Start conversation (voice)"}>
-                      {voiceMode ? "🔴" : "🎤"}
-                    </button>
-                    <button type="submit" className="send-btn">➤</button>
+                  <div className="ai-chat-composer" style={{ position: 'relative' }}>
+                    <form onSubmit={handleSend} className="ai-chat-input-row">
+                      <textarea ref={inputRef} className="ai-chat-input" value={messageText}
+                        onChange={handleInputChange} onKeyDown={handleKeyDown}
+                        rows={1}
+                        placeholder={voiceMode
+                          ? (voiceLanguage === "ta" ? "இயல்பாக பேசுங்கள்... உரை இங்கே தோன்றும்..." : "Speak naturally... your words will appear here...")
+                          : (!selectedRestaurant
+                            ? "Tap 🎤 and say what you want. We will turn it into text for you..."
+                            : "Tap 🎤 and say your order. We will turn it into text here...")}
+                      />
+                      <button
+                        type="button"
+                        className={`mic-btn mic-btn-ptt ${voiceMode ? "voice-active" : ""} ${micButtonStateClass}`}
+                        title="Tap to dictate. Your voice will appear as text automatically."
+                        aria-label="Tap to dictate. Your voice will appear as text automatically."
+                        onClick={handleMicClick}
+                      >{micButtonIcon}</button>
+                      <button type="submit" className="send-btn">➤</button>
+                    </form>
+                    <div className={`voice-helper ${micButtonStateClass}`}>{voiceHelperText}</div>
                     {/* Restaurant suggestions */}
                     {showSuggestions && (
                       <div className="suggestions">
@@ -1887,7 +2552,7 @@ export default function App() {
                         ))}
                       </div>
                     )}
-                  </form>
+                  </div>
                 </div>
               </>
             )}

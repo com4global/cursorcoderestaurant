@@ -25,6 +25,11 @@ const PROTEINS = ['chicken', 'mutton', 'lamb', 'fish', 'prawn', 'shrimp', 'egg',
 const SPICE_LEVELS = ['extra spicy', 'not spicy', 'less spicy', 'spicy', 'mild', 'medium', 'hot'];
 const CUISINES = ['south indian', 'north indian', 'indo-chinese', 'indian', 'chinese', 'italian', 'mexican', 'thai', 'japanese', 'american', 'mediterranean', 'korean', 'mughlai'];
 const DIETS = ['vegetarian', 'vegan', 'non-veg', 'non veg', 'halal', 'gluten-free', 'keto', 'low-carb', 'jain', 'veg'];
+const DISH_FUZZY_IGNORE_WORDS = new Set([
+    'today', 'todays', 'todays', 'special', 'specials', 'menu', 'menus', 'item', 'items',
+    'option', 'options', 'something', 'anything', 'show', 'give', 'nearby', 'cheap', 'cheapest',
+    'best', 'popular', 'what', 'have', 'here', 'some', 'recommend', 'suggest', 'find', 'price',
+]);
 
 // Words that mean menu categories/sections — don't treat as restaurant name when user says e.g. "drinks"
 const CATEGORY_LIKE_WORDS = new Set([
@@ -48,8 +53,139 @@ export const INTENTS = {
     MEAL_PLAN: 'MEAL_PLAN',            // "plan meals for the week"
     SHOW_CART: 'SHOW_CART',            // "what's in my cart", "show cart"
     CLEAR_CART: 'CLEAR_CART',          // "clear the cart", "order fresh"
+    MULTI_ORDER: 'MULTI_ORDER',        // "biryani from aroma and soup from anjappar"
     UNCLEAR: 'UNCLEAR',                // Can't classify
 };
+
+/**
+ * Detect multi-restaurant order: "X from RestA and Y from RestB"
+ * Returns true if input clearly spans multiple restaurants.
+ * restaurants = array of {name, slug} objects (optional, improves accuracy)
+ */
+export function detectMultiOrder(text, restaurants = []) {
+    const t = text.toLowerCase().trim();
+    // Need at least 2 "from X" or "at X" clauses.
+    // Capture candidate restaurant phrases until the next connector or end of string.
+    const fromMatches = [...t.matchAll(/(?:from|at)\s+([^,]+?)(?=\s+and\b|\s+also\b|\s*,|$)/gi)];
+    if (fromMatches.length < 2) return false;
+
+    // At least one of the "from X" must resolve to a known restaurant
+    if (restaurants.length === 0) return true; // no list to check against — optimistically true
+
+    const allNames = restaurants.flatMap(r => [
+        r.name.toLowerCase(),
+        r.slug.replace(/-/g, ' '),
+        ...r.name.toLowerCase().split(/\s+/),
+    ]);
+    return fromMatches.some((fm) => {
+        const candidate = (fm[1] || '').replace(/\s+and.*$/i, '').trim();
+        return allNames.some(n => n.includes(candidate) || candidate.includes(n.split(' ')[0]));
+    });
+}
+
+export function shouldBypassGlobalSearch(text, intentResult = {}, restaurants = []) {
+    const t = String(text || '').toLowerCase().trim();
+    if (!t) return false;
+
+    const entities = intentResult.entities || {};
+    const hasFoodEntity = Boolean(entities.dish || entities.protein || entities.cuisine || entities.priceMax);
+    const hasNonLatinScript = /[^\u0000-\u00ff]/u.test(t);
+    const hasRestaurantMarker = /\b(from|at|in|restaurant|hotel|menu)\b/i.test(t) || /ரெஸ்டார|ஹோட்டல்|மெனு/u.test(t);
+    const hasDiscoveryHint = /\b(nearby|near me|cheap|cheapest|compare|comparison|best value|lowest|price|options|suggest|find me|show me)\b/i.test(t);
+    if (hasDiscoveryHint) return false;
+
+    const hasQuantity = /(?<!\S)(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|ஒரு|இரண்டு|மூன்று)\b/i.test(t);
+    const hasOrderVerb = /\b(order|add|get|i want|i need|give me|have)\b/i.test(t) || /ஆர்டர்|வேண்டும்|பண்ணு|கொடுங்க|எனக்கு/u.test(t);
+    const hasTamilConnector = /அப்புறம்|பிறகு|மற்றும்|அடுத்து/u.test(t);
+    const hasRestaurantName = restaurants.some((restaurant) => {
+        const name = String(restaurant?.name || '').toLowerCase();
+        const slug = String(restaurant?.slug || '').replace(/-/g, ' ').toLowerCase();
+        return (name && t.includes(name)) || (slug && t.includes(slug));
+    });
+
+    if (intentResult.intent === INTENTS.MULTI_ORDER) return true;
+
+    return (
+        (hasFoodEntity || hasOrderVerb || hasQuantity)
+        && (hasNonLatinScript || hasRestaurantMarker || hasTamilConnector || hasRestaurantName)
+    );
+}
+
+export function shouldUseDiscoverySearch(text, intentResult = {}) {
+    const t = String(text || '').toLowerCase().trim();
+    if (!t) return false;
+
+    const entities = intentResult.entities || {};
+    const hasDishEntity = Boolean(entities.dish || entities.protein || entities.cuisine);
+    const hasDirectOrderCommand = /^(?:add|order|get\s+me|give\s+me|get|i(?:'ll|\s+will)\s+(?:have|take|get)|i\s+want|i\s+need|i'?d\s+like)\b/i.test(t);
+    const isMenuBrowseRequest = /today'?s\s+specials?|\bspecials?\b|\bmenu\b|\bmenus\b|\bcategories?\b|\boptions?\b|\bwhat\s+do\s+you\s+have\b|\bshow\s+me\b/i.test(t);
+    const hasDiscoveryHint = /\b(nearby|near\s+by|near me|cheap|cheapest|compare|comparison|best value|best rate|lowest|price|options|suggest|recommend|recommend me|find me|show me|restaurants with|where can i get|where can i find|who has|which restaurant has|popular|combo|combos|meal deal|deals?)\b/i.test(t);
+    const hasFoodSignal = Boolean(entities.dish || entities.protein || entities.cuisine || entities.priceMax || /\b(biryani|pizza|burger|soup|dosa|naan|curry|rice|coffee|tea|chicken|mutton|chaat|masala|combo|combos|meal|meals)\b/i.test(t));
+    const hasRecommendationQuery = /don'?t\s+know\s+what\s+to\s+eat|what\s+should\s+i\s+eat|what\s+to\s+eat|suggest\s+something|recommend\s+something|surprise\s+me|dinner\s+ideas|lunch\s+ideas|any\s+combos?|something\s+(?:cheap|spicy|tasty|good|special)|special\s+item|popular\s+dishes?/i.test(t);
+    return (hasDiscoveryHint && (hasFoodSignal || hasRecommendationQuery)) || (hasDishEntity && !hasDirectOrderCommand && !isMenuBrowseRequest && !/\bfrom\b/i.test(t));
+}
+
+function shouldTreatAsDiscoveryStyleRequest(text, entities = {}) {
+    return shouldUseDiscoverySearch(text, { entities });
+}
+
+function countRestaurantMentions(text, restaurants = []) {
+    const t = String(text || '').toLowerCase();
+    if (!t || restaurants.length === 0) return 0;
+
+    const matchedIds = new Set();
+    restaurants.forEach((restaurant, index) => {
+        const name = String(restaurant?.name || '').toLowerCase();
+        const slug = String(restaurant?.slug || '').replace(/-/g, ' ').toLowerCase();
+        const shortName = name.split(/\s+/).filter(Boolean)[0] || '';
+
+        if (
+            (name && t.includes(name))
+            || (slug && t.includes(slug))
+            || (shortName && shortName.length >= 4 && t.includes(shortName))
+        ) {
+            matchedIds.add(restaurant?.id ?? `idx:${index}`);
+        }
+    });
+
+    return matchedIds.size;
+}
+
+function detectOrderLikeRestaurantFlow(text, restaurants = []) {
+    const t = String(text || '').toLowerCase().trim();
+    if (!t) {
+        return {
+            restaurantMentions: 0,
+            hasFoodSignal: false,
+            hasQuantity: false,
+            hasOrderVerb: false,
+            hasConnector: false,
+            looksLikeOrder: false,
+            looksLikeMultiRestaurantOrder: false,
+        };
+    }
+
+    const restaurantMentions = countRestaurantMentions(t, restaurants);
+    const hasFoodSignal = Boolean(
+        extractDish(t)
+        || PROTEINS.some((protein) => t.includes(protein))
+        || /சூப்|பிரியாணி|நான்|தோசை|குழம்பு|சிக்கன்|மட்டன்|பட்டர்/u.test(t)
+    );
+    const hasQuantity = /(?<!\S)(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|ஒரு|இரண்டு|மூன்று|நாலு|அஞ்சு)\b/i.test(t);
+    const hasOrderVerb = /\b(order|add|get|i want|i need|give me|have)\b/i.test(t) || /ஆர்டர்|வேண்டும்|பண்ணு|கொடுங்க|எனக்கு/u.test(t);
+    const hasConnector = /\b(and|then|after|next)\b/i.test(t) || /அப்புறம்|பிறகு|மற்றும்|அடுத்து/u.test(t);
+    const looksLikeOrder = hasFoodSignal && (hasQuantity || hasOrderVerb || hasConnector);
+
+    return {
+        restaurantMentions,
+        hasFoodSignal,
+        hasQuantity,
+        hasOrderVerb,
+        hasConnector,
+        looksLikeOrder,
+        looksLikeMultiRestaurantOrder: looksLikeOrder && restaurantMentions >= 2,
+    };
+}
 
 // ─── Intent detection patterns ──────────────────────────────────────
 
@@ -75,6 +211,16 @@ const ADD_TO_CART_PATTERNS = [
     /^(?:order)\s+(?:that|this|it|the)/i,
 ];
 
+const MENU_BROWSE_PATTERNS = [
+    /today'?s\s+specials?/i,
+    /\bspecials?\b/i,
+    /\bmenu\b|\bmenus\b/i,
+    /\bcategories?\b/i,
+    /\boptions?\b/i,
+    /\bwhat\s+do\s+you\s+have\b/i,
+    /\bshow\s+me\b/i,
+];
+
 const REMOVE_PATTERNS = [
     /^(?:remove|delete|cancel|take\s+out|drop)\s+/i,
 ];
@@ -85,7 +231,7 @@ const CHECKOUT_PATTERNS = [
 ];
 
 const SHOW_CART_PATTERNS = [
-    /^(?:show|what'?s?\s+(?:in\s+)?(?:my\s+)?cart|view\s+cart|my\s+cart|my\s+order|cart)\s*$/i,
+    /^(?:show\s+(?:me\s+)?(?:my\s+)?(?:the\s+)?cart|what'?s?\s+(?:in\s+)?(?:my\s+)?cart|view\s+cart|my\s+cart|my\s+order|cart)\s*$/i,
 ];
 
 const CLEAR_CART_PATTERNS = [
@@ -134,6 +280,9 @@ const MEAL_PLAN_PATTERNS = [
 export function parseIntent(text, convState = {}, restaurants = []) {
     const t = text.toLowerCase().trim();
     const start = performance.now();
+    const orderLikeRestaurantFlow = detectOrderLikeRestaurantFlow(t, restaurants);
+    const shouldBlockRestaurantSwitch = orderLikeRestaurantFlow.looksLikeOrder
+        && (orderLikeRestaurantFlow.restaurantMentions >= 1 || /ரெஸ்டார|ஹோட்டல்|மெனு/u.test(t));
 
     const result = {
         intent: INTENTS.UNCLEAR,
@@ -143,6 +292,19 @@ export function parseIntent(text, convState = {}, restaurants = []) {
         raw: text,
         parseTimeMs: 0,
     };
+
+    // ─── 0. Multi-restaurant order (fast exit — must check before CHANGE_RESTAURANT) ─
+    if (detectMultiOrder(t, restaurants)) {
+        result.intent = INTENTS.MULTI_ORDER;
+        result.parseTimeMs = performance.now() - start;
+        return result;
+    }
+
+    if (orderLikeRestaurantFlow.looksLikeMultiRestaurantOrder) {
+        result.intent = INTENTS.MULTI_ORDER;
+        result.parseTimeMs = performance.now() - start;
+        return result;
+    }
 
     // ─── 1. Greeting/Help/Thanks/Goodbye (fast exit) ─────────────
     if (GREETING_PATTERNS.some(p => p.test(t))) {
@@ -223,57 +385,79 @@ export function parseIntent(text, convState = {}, restaurants = []) {
 
     // ─── 6. Change restaurant (to specific name) ───────────────────
     if (restaurants.length > 0) {
-        // "go to the restaurant DC District" → extract "DC District" (voice often says "DC" for "Desi")
-        const goToRestaurantRegex = /^go\s+to\s+the\s+restaurant\s+(?:to\s+)?/i;
-        const switchRegex = /^(?:change|switch|move)\s+(?:to\s+|the\s+restaurant\s+to\s+)/i;
-        const switchRegexGo = /^go\s+to\s+the\s+restaurant\s+to\s+/i;
-        const fromRegex = /(?:from|at|in)\s+(.+?)(?:\s+restaurant|\s+menu)?\s*$/i;
-        const selectRegex = /^(?:show|open|select|pick|choose|try|use|browse|order\s+from)\s+/i;
-        // Handle 'I want to select X restaurant', 'can you select the restaurant X', 'take me to X', 'let's try X'
-        const wantSelectRegex = /(?:i\s+want\s+(?:to\s+)?(?:select|go\s+to|try|visit|order\s+from|eat\s+(?:at|from))\s+|take\s+me\s+to\s+|let'?s?\s+(?:go\s+to|try|eat\s+at)\s+|(?:can|could|would)\s+you\s+(?:please\s+)?(?:select|switch\s+to|change\s+to|go\s+to|open|show)\s+(?:the\s+)?(?:restaurant\s+)?|please\s+(?:select|switch\s+to|change\s+to|go\s+to|open)\s+(?:the\s+)?(?:restaurant\s+)?)(.+?)(?:\s+restaurant|\s+menu)?\s*$/i;
+        // If the text looks like an order with quantities + "from", let the backend
+        // handle it (multi-restaurant parsing) instead of treating it as CHANGE_RESTAURANT.
+        const fromMatches = t.match(/\sfrom\s/g) || [];
+        const hasQtyWord = /\b(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\b/.test(t);
+        const looksLikeOrderFrom = (fromMatches.length >= 1 && hasQtyWord) || orderLikeRestaurantFlow.looksLikeOrder;
+        if (!looksLikeOrderFrom && !shouldBlockRestaurantSwitch) {
+            // "go to the restaurant DC District" → extract "DC District" (voice often says "DC" for "Desi")
+            const goToRestaurantRegex = /^go\s+to\s+the\s+restaurant\s+(?:to\s+)?/i;
+            const switchRegex = /^(?:change|switch|move)\s+(?:to\s+|the\s+restaurant\s+to\s+)/i;
+            const switchRegexGo = /^go\s+to\s+the\s+restaurant\s+to\s+/i;
+            const fromRegex = /(?:from|at|in)\s+(.+?)(?:\s+restaurant|\s+menu)?\s*$/i;
+            const selectRegex = /^(?:show|open|select|pick|choose|try|use|browse|order\s+from)\s+/i;
+            // Handle 'I want to select X restaurant', 'can you select the restaurant X', 'take me to X', 'let's try X'
+            const wantSelectRegex = /(?:i\s+want\s+(?:to\s+)?(?:select|go\s+to|try|visit|order\s+from|eat\s+(?:at|from))\s+|take\s+me\s+to\s+|let'?s?\s+(?:go\s+to|try|eat\s+at)\s+|(?:can|could|would)\s+you\s+(?:please\s+)?(?:select|switch\s+to|change\s+to|go\s+to|open|show)\s+(?:the\s+)?(?:restaurant\s+)?|please\s+(?:select|switch\s+to|change\s+to|go\s+to|open)\s+(?:the\s+)?(?:restaurant\s+)?)(.+?)(?:\s+restaurant|\s+menu)?\s*$/i;
 
-        let candidateName = null;
+            let candidateName = null;
 
-        if (goToRestaurantRegex.test(t)) {
-            candidateName = t.replace(goToRestaurantRegex, '').trim();
-        } else if (switchRegex.test(t)) {
-            candidateName = t.replace(switchRegex, '').trim();
-        } else if (switchRegexGo.test(t)) {
-            candidateName = t.replace(switchRegexGo, '').trim();
-        } else if (wantSelectRegex.test(t)) {
-            candidateName = t.match(wantSelectRegex)?.[1]?.trim();
-        } else if (fromRegex.test(t)) {
-            candidateName = t.match(fromRegex)?.[1]?.trim();
-        } else if (selectRegex.test(t)) {
-            candidateName = t.replace(selectRegex, '').trim();
-        }
+            if (goToRestaurantRegex.test(t)) {
+                candidateName = t.replace(goToRestaurantRegex, '').trim();
+            } else if (switchRegex.test(t)) {
+                candidateName = t.replace(switchRegex, '').trim();
+            } else if (switchRegexGo.test(t)) {
+                candidateName = t.replace(switchRegexGo, '').trim();
+            } else if (wantSelectRegex.test(t)) {
+                candidateName = t.match(wantSelectRegex)?.[1]?.trim();
+            } else if (fromRegex.test(t)) {
+                candidateName = t.match(fromRegex)?.[1]?.trim();
+            } else if (selectRegex.test(t)) {
+                candidateName = t.replace(selectRegex, '').trim();
+            }
 
-        if (candidateName) {
-            const match = fuzzyMatchRestaurant(candidateName, restaurants);
-            if (match) {
+            if (candidateName) {
+                const match = fuzzyMatchRestaurant(candidateName, restaurants);
+                if (match) {
+                    result.intent = INTENTS.CHANGE_RESTAURANT;
+                    result.restaurantMatch = match;
+                    result.stateUpdate = { restaurant: match.name, restaurantId: match.id };
+                    result.parseTimeMs = performance.now() - start;
+                    return result;
+                }
+            }
+
+            // Also check if the entire input IS a restaurant name (skip if it's a category word like "drinks")
+            const isCategoryLike = CATEGORY_LIKE_WORDS.has(t) || (t.split(/\s+/).length === 1 && [...CATEGORY_LIKE_WORDS].some(w => w.includes(t) || t.includes(w)));
+            const directMatch = isCategoryLike ? null : fuzzyMatchRestaurant(t, restaurants);
+            if (directMatch && !extractDish(t)) {
                 result.intent = INTENTS.CHANGE_RESTAURANT;
-                result.restaurantMatch = match;
-                result.stateUpdate = { restaurant: match.name, restaurantId: match.id };
+                result.restaurantMatch = directMatch;
+                result.stateUpdate = { restaurant: directMatch.name, restaurantId: directMatch.id };
                 result.parseTimeMs = performance.now() - start;
                 return result;
             }
-        }
-
-        // Also check if the entire input IS a restaurant name (skip if it's a category word like "drinks")
-        const isCategoryLike = CATEGORY_LIKE_WORDS.has(t) || (t.split(/\s+/).length === 1 && [...CATEGORY_LIKE_WORDS].some(w => w.includes(t) || t.includes(w)));
-        const directMatch = isCategoryLike ? null : fuzzyMatchRestaurant(t, restaurants);
-        if (directMatch && !extractDish(t)) {
-            result.intent = INTENTS.CHANGE_RESTAURANT;
-            result.restaurantMatch = directMatch;
-            result.stateUpdate = { restaurant: directMatch.name, restaurantId: directMatch.id };
-            result.parseTimeMs = performance.now() - start;
-            return result;
         }
     }
 
     // ─── 7. Extract entities ─────────────────────────────────────
     const entities = extractEntities(t);
     result.entities = entities;
+    const isMenuBrowseRequest = MENU_BROWSE_PATTERNS.some((p) => p.test(t));
+    const isDiscoveryStyleRequest = shouldTreatAsDiscoveryStyleRequest(t, entities);
+
+    if (
+        shouldBlockRestaurantSwitch
+        && !orderLikeRestaurantFlow.looksLikeMultiRestaurantOrder
+        && !entities.dish
+        && !entities.protein
+        && !entities.cuisine
+        && !entities.priceMax
+    ) {
+        result.intent = INTENTS.UNCLEAR;
+        result.parseTimeMs = performance.now() - start;
+        return result;
+    }
 
     // ─── 8. Filter update (modifier on existing results) ─────────
     if (convState.dish || convState.lastResults) {
@@ -331,7 +515,11 @@ export function parseIntent(text, convState = {}, restaurants = []) {
     }
 
     // ─── 9. Add to cart ──────────────────────────────────────────
-    if (ADD_TO_CART_PATTERNS.some(p => p.test(t))) {
+    if (
+        ADD_TO_CART_PATTERNS.some(p => p.test(t))
+        && !isDiscoveryStyleRequest
+        && !(isMenuBrowseRequest && !entities.dish && !entities.protein)
+    ) {
         result.intent = INTENTS.ADD_TO_CART;
         // Extract quantity
         const qtyMatch = t.match(/(\d+)\s+/);
@@ -411,6 +599,25 @@ function extractDish(t) {
     for (const d of sortedDishes) {
         if (t.includes(d)) return d;
     }
+
+    const words = t.split(/[^a-z0-9]+/).filter(Boolean);
+    let bestDish = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const word of words) {
+        if (word.length < 4) continue;
+        if (DISH_FUZZY_IGNORE_WORDS.has(word)) continue;
+        for (const dish of sortedDishes) {
+            if (Math.abs(word.length - dish.length) > 2) continue;
+            const distance = editDistance(word, dish);
+            const maxDistance = Math.max(2, Math.floor(dish.length * 0.25));
+            if (distance <= maxDistance && distance < bestDistance) {
+                bestDish = dish;
+                bestDistance = distance;
+            }
+        }
+    }
+    if (bestDish) return bestDish;
+
     return null;
 }
 

@@ -64,6 +64,11 @@ export async function searchMenuItems(query) {
   return request(`/search/menu-items?q=${encodeURIComponent(query)}`);
 }
 
+/** Fetch categories for a restaurant (no auth required). Used when opening a restaurant menu. */
+export async function fetchRestaurantCategories(restaurantId) {
+  return request(`/restaurants/${restaurantId}/categories`);
+}
+
 /** Fetch menu items for a category (no auth required). Used when guest clicks a category. */
 export async function fetchCategoryItems(categoryId) {
   return request(`/categories/${categoryId}/items`);

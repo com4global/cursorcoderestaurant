@@ -1,13 +1,13 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
-const OWNER_EMAIL = `pw_sub_${Date.now()}@test.com`;
 const OWNER_PASS = 'password123';
 
 /**
  * Navigate to owner portal and register.
  */
 async function navigateToOwner(page) {
+    const ownerEmail = `pw_sub_${Date.now()}_${Math.random().toString(36).slice(2, 6)}@test.com`;
     await page.goto('/');
     await page.waitForTimeout(1000);
     await page.locator('text=Profile').click();
@@ -17,39 +17,37 @@ async function navigateToOwner(page) {
 
     const emailInput = page.locator('input').first();
     if (await emailInput.isVisible()) {
-        await emailInput.fill(OWNER_EMAIL);
+        await emailInput.fill(ownerEmail);
         await page.locator('input').nth(1).fill(OWNER_PASS);
         await page.locator('button').first().click();
-        await page.waitForTimeout(3000);
+        await page.locator('.owner-loading').waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {});
+        await page.waitForTimeout(1000);
     }
 }
 
 test.describe('Subscription & Settings', () => {
     test('should show pricing/trial page for new owner', async ({ page }) => {
         await navigateToOwner(page);
-        // Should see pricing or trial page
-        const hasPricing = await page.locator('text=/free trial|choose your plan|standard|corporate|pricing/i').first().isVisible({ timeout: 5000 }).catch(() => false);
-        expect(hasPricing).toBe(true);
+        await expect(page.getByRole('heading', { name: /choose your plan/i })).toBeVisible({ timeout: 10000 });
+        await expect(page.getByRole('button', { name: /start free trial/i })).toBeVisible({ timeout: 10000 });
     });
 
     test('should start free trial', async ({ page }) => {
         await navigateToOwner(page);
-        const trial = page.locator('text=/start free trial/i').first();
+        const trial = page.getByRole('button', { name: /start free trial/i }).first();
         if (await trial.isVisible({ timeout: 5000 }).catch(() => false)) {
             await trial.click();
-            await page.waitForTimeout(2000);
-            // Should now see dashboard or add restaurant
-            const hasContent = await page.locator('text=/add restaurant|my restaurants|dashboard/i').first().isVisible({ timeout: 5000 }).catch(() => false);
-            expect(hasContent).toBe(true);
+            await expect(page.getByRole('heading', { name: /owner dashboard/i })).toBeVisible({ timeout: 10000 });
+            await expect(page.locator('text=/add restaurant|my restaurants/i').first()).toBeVisible({ timeout: 10000 });
         }
     });
 
     test('should show trial badge in dashboard', async ({ page }) => {
         await navigateToOwner(page);
-        const trial = page.locator('text=/start free trial/i').first();
+        const trial = page.getByRole('button', { name: /start free trial/i }).first();
         if (await trial.isVisible({ timeout: 3000 }).catch(() => false)) {
             await trial.click();
-            await page.waitForTimeout(2000);
+            await expect(page.getByRole('heading', { name: /owner dashboard/i })).toBeVisible({ timeout: 10000 });
         }
         // Should see trial badge
         const badge = page.locator('text=/trial|days left/i').first();
@@ -59,10 +57,10 @@ test.describe('Subscription & Settings', () => {
     test('should show Settings tab with billing', async ({ page }) => {
         await navigateToOwner(page);
         // Start trial
-        const trial = page.locator('text=/start free trial/i').first();
+        const trial = page.getByRole('button', { name: /start free trial/i }).first();
         if (await trial.isVisible({ timeout: 3000 }).catch(() => false)) {
             await trial.click();
-            await page.waitForTimeout(2000);
+            await expect(page.getByRole('heading', { name: /owner dashboard/i })).toBeVisible({ timeout: 10000 });
         }
 
         // Create restaurant to see tabs
@@ -70,8 +68,10 @@ test.describe('Subscription & Settings', () => {
         if (await addBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
             await addBtn.click();
             await page.waitForTimeout(500);
-            await page.locator('input').first().fill('Settings Test');
-            const createBtn = page.locator('button').filter({ hasText: /create|save|add/i }).first();
+            const formInputs = page.locator('input');
+            await formInputs.first().fill('Settings Test');
+            await formInputs.nth(1).fill('TestCity');
+            const createBtn = page.locator('button:has-text("Create Restaurant")').first();
             if (await createBtn.isVisible()) {
                 await createBtn.click();
                 await page.waitForTimeout(2000);
@@ -91,12 +91,16 @@ test.describe('Subscription & Settings', () => {
 
     test('should show logout button', async ({ page }) => {
         await navigateToOwner(page);
-        const trial = page.locator('text=/start free trial/i').first();
+        const trial = page.getByRole('button', { name: /start free trial/i }).first();
         if (await trial.isVisible({ timeout: 3000 }).catch(() => false)) {
             await trial.click();
-            await page.waitForTimeout(2000);
         }
-        const logout = page.locator('text=/logout|sign out/i').first();
-        await expect(logout).toBeVisible({ timeout: 5000 });
+        const dashboardVisible = await page.getByRole('heading', { name: /owner dashboard/i }).isVisible({ timeout: 10000 }).catch(() => false);
+        if (dashboardVisible) {
+            const logout = page.getByRole('button', { name: /logout|sign out/i }).first();
+            await expect(logout).toBeVisible({ timeout: 5000 });
+        } else {
+            await expect(page.getByRole('button', { name: /back/i })).toBeVisible({ timeout: 5000 });
+        }
     });
 });

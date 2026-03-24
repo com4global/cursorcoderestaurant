@@ -20,18 +20,17 @@ async function loginAsCustomer(page) {
     await page.waitForTimeout(1500);
 }
 
-async function selectRestaurant(page) {
-    const card = page.locator('.restaurant-card-v').first();
-    await expect(card).toBeVisible({ timeout: 5000 });
-    await card.click();
-    await page.waitForTimeout(3000);
-    await expect(page.locator('.cat-pill').first()).toBeVisible({ timeout: 8000 });
+async function goToGlobalChat(page) {
+    await page.locator('.nav-item:has-text("Chat")').click();
+    await page.waitForTimeout(1000);
+    await expect(page.locator('.chat-header-title')).toContainText('RestaurantAI', { timeout: 10000 });
+    await expect(page.locator('.ai-chat-input')).toBeVisible({ timeout: 10000 });
 }
 
 test.describe('Price Comparison', () => {
     test('should show comparison card for "cheapest biryani"', async ({ page }) => {
         await loginAsCustomer(page);
-        await selectRestaurant(page);
+        await goToGlobalChat(page);
         await page.locator('.ai-chat-input').fill('cheapest biryani');
         await page.locator('.send-btn').click();
         await page.waitForTimeout(3000);
@@ -40,7 +39,7 @@ test.describe('Price Comparison', () => {
 
     test('should show comparison card for "compare chicken"', async ({ page }) => {
         await loginAsCustomer(page);
-        await selectRestaurant(page);
+        await goToGlobalChat(page);
         await page.locator('.ai-chat-input').fill('compare chicken');
         await page.locator('.send-btn').click();
         await page.waitForTimeout(3000);
@@ -49,7 +48,7 @@ test.describe('Price Comparison', () => {
 
     test('comparison card should have Order buttons', async ({ page }) => {
         await loginAsCustomer(page);
-        await selectRestaurant(page);
+        await goToGlobalChat(page);
         await page.locator('.ai-chat-input').fill('cheapest biryani');
         await page.locator('.send-btn').click();
         await page.waitForTimeout(3000);
@@ -58,10 +57,30 @@ test.describe('Price Comparison', () => {
 
     test('comparison card should show best value footer', async ({ page }) => {
         await loginAsCustomer(page);
-        await selectRestaurant(page);
+        await goToGlobalChat(page);
         await page.locator('.ai-chat-input').fill('cheapest biryani');
         await page.locator('.send-btn').click();
         await page.waitForTimeout(3000);
         await expect(page.locator('.compare-footer')).toBeVisible({ timeout: 8000 });
+    });
+
+    test('should show comparison options for vague combo request phrasing', async ({ page }) => {
+        await loginAsCustomer(page);
+        await goToGlobalChat(page);
+        await page.locator('.ai-chat-input').fill('give me some special combos today');
+        await page.locator('.send-btn').click();
+        await page.waitForTimeout(3000);
+        await expect(page.locator('.price-compare-card')).toBeVisible({ timeout: 10000 });
+        await expect(page.locator('.compare-order-btn').first()).toBeVisible({ timeout: 10000 });
+    });
+
+    test('should show comparison options for misspelled dish queries', async ({ page }) => {
+        await loginAsCustomer(page);
+        await goToGlobalChat(page);
+        await page.locator('.ai-chat-input').fill('briyani');
+        await page.locator('.send-btn').click();
+        await page.waitForTimeout(3000);
+        await expect(page.locator('.price-compare-card')).toBeVisible({ timeout: 10000 });
+        await expect(page.locator('.compare-order-btn').first()).toBeVisible({ timeout: 10000 });
     });
 });

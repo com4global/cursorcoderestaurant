@@ -13,6 +13,12 @@ const DEFAULT_SPEAKER = 'kavya';
 const DEFAULT_LANG = 'en-IN';
 const _isIOS = typeof navigator !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent);
 
+/** Only send en-IN or ta-IN to Sarvam; default English so output matches user expectation. */
+function normalizeTTSLang(lang) {
+    if (typeof lang === 'string' && (lang === 'ta-IN' || lang.toLowerCase().startsWith('ta'))) return 'ta-IN';
+    return 'en-IN';
+}
+
 function cleanForTTS(text) {
     return text
         .replace(/\*\*|__|~~|`/g, '')
@@ -43,12 +49,13 @@ function splitIntoChunks(text) {
 
 async function generateChunkAudio(apiBase, text, speaker = DEFAULT_SPEAKER, lang = DEFAULT_LANG) {
     if (!text || text.trim().length < 2) return null;
+    const langCode = normalizeTTSLang(lang);
     try {
-        vlog('TTS', `fetch /api/voice/tts`, { text: text.substring(0, 50) });
+        vlog('TTS', `fetch /api/voice/tts`, { text: text.substring(0, 50), language: langCode });
         const resp = await fetch(`${apiBase}/api/voice/tts`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: text.substring(0, 2000), language: lang, speaker }),
+            body: JSON.stringify({ text: text.substring(0, 2000), language: langCode, speaker }),
         });
         if (!resp.ok) { vlog('ERR', `TTS fetch: ${resp.status}`); return null; }
         const data = await resp.json();
@@ -132,8 +139,9 @@ export class TTSPlayer {
         this.isCancelled = false;
         this.isPlaying = true;
 
+        const langCode = normalizeTTSLang(lang);
         const clean = cleanForTTS(text);
-        vlog('TTS', `speak()`, { cleanLen: clean.length });
+        vlog('TTS', `speak()`, { cleanLen: clean.length, language: langCode });
 
         if (!clean) { this.isPlaying = false; this.onComplete?.(); return; }
 
@@ -144,7 +152,7 @@ export class TTSPlayer {
         vlog('TTS', `${chunks.length} chunk(s)`);
 
         // Pre-fetch all chunks
-        const audioPromises = chunks.map(c => generateChunkAudio(this.apiBase, c, speaker, lang));
+        const audioPromises = chunks.map(c => generateChunkAudio(this.apiBase, c, speaker, langCode));
 
         for (let i = 0; i < chunks.length; i++) {
             if (this.isCancelled) break;

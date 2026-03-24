@@ -656,26 +656,175 @@ img {
   font-size: 0.65rem;
 }
 
-/* Category Pills */
-.category-pills {
+.chat-cart-preview {
+  width: calc(100% - 32px);
+  margin: 12px 16px 8px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(249, 115, 22, 0.22);
+  background: linear-gradient(135deg, rgba(249, 115, 22, 0.16), rgba(15, 23, 42, 0.92));
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+}
+
+.chat-cart-preview-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chat-cart-preview-eyebrow {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.chat-cart-preview-total {
+  font-size: 1rem;
+  font-weight: 800;
+  color: #fff7ed;
+}
+
+.chat-cart-preview-restaurant {
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: #ffffff;
+  line-height: 1.25;
+}
+
+.chat-cart-preview-items {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 10px 16px;
-  background: var(--bg-secondary);
+}
+
+.chat-cart-preview-chip {
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 0.74rem;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: normal;
+}
+
+.chat-cart-preview-chip.more {
+  background: rgba(15, 23, 42, 0.48);
+  color: #fed7aa;
+}
+
+.chat-cart-preview-foot {
+  font-size: 0.74rem;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+/* Category Pills */
+.menu-browser-shell {
+  padding: 10px 16px 12px;
+  background: linear-gradient(180deg, rgba(20, 20, 20, 0.98), rgba(20, 20, 20, 0.92));
   border-bottom: 1px solid var(--border);
+}
+
+.menu-browser-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.menu-browser-eyebrow {
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+
+.menu-browser-title {
+  font-size: 0.94rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.menu-browser-meta {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.category-pills-wrap {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  flex: 1;
+}
+
+.category-pills-wrap::-webkit-scrollbar {
+  display: none;
+}
+
+.category-pills-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.category-nav-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
+  font-size: 1rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: var(--transition);
+}
+
+.category-nav-btn.enabled:hover {
+  border-color: rgba(249, 115, 22, 0.45);
+  color: #fff7ed;
+  background: rgba(249, 115, 22, 0.14);
+}
+
+.category-nav-btn.disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.category-pills {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 10px;
+  min-width: max-content;
 }
 
 .cat-pill {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 6px 14px;
-  border-radius: var(--radius-full);
-  font-size: 0.78rem;
-  font-weight: 500;
-  background: var(--bg-glass);
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.05);
   border: 1px solid var(--border);
   color: var(--text-secondary);
   transition: var(--transition);
@@ -693,10 +842,11 @@ img {
 }
 
 .cat-pill.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: linear-gradient(135deg, rgba(249, 115, 22, 0.22), rgba(249, 115, 22, 0.12));
+  border-color: rgba(249, 115, 22, 0.45);
+  color: #fff7ed;
   font-weight: 600;
+  box-shadow: 0 10px 22px rgba(249, 115, 22, 0.14);
 }
 
 .cat-pill .cat-emoji {
@@ -711,23 +861,65 @@ img {
   flex-shrink: 0;
 }
 
+.cat-pill .cat-label {
+  max-width: 112px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .cat-pill .cat-count {
   font-size: 0.6rem;
-  background: rgba(255, 255, 255, 0.15);
-  padding: 1px 5px;
+  background: rgba(255, 255, 255, 0.1);
+  padding: 2px 6px;
   border-radius: var(--radius-full);
 }
 
 .cat-pill.active .cat-count {
-  background: rgba(0, 0, 0, 0.2);
+  background: rgba(0, 0, 0, 0.22);
 }
 
 /* Menu Items */
 .menu-area {
   flex: 1;
   overflow-y: auto;
-  padding: 12px 16px;
+  padding: 12px 16px 18px;
   -webkit-overflow-scrolling: touch;
+}
+
+.menu-area-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0 10px;
+  margin-bottom: 6px;
+  background: linear-gradient(180deg, rgba(10, 10, 10, 0.98), rgba(10, 10, 10, 0.9), transparent);
+}
+
+.menu-area-title {
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.menu-area-subtitle {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+@media (max-width: 480px) {
+  .category-pills-nav {
+    gap: 6px;
+  }
+
+  .category-nav-btn {
+    width: 28px;
+    height: 28px;
+  }
 }
 
 .menu-item {
@@ -889,11 +1081,89 @@ img {
   color: var(--text-secondary);
   line-height: 1.4;
   max-width: 85%;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .ai-bubble strong {
   color: var(--text-primary);
   font-weight: 600;
+}
+
+.ai-bubble.ai-bubble-onboarding {
+  padding: 0;
+  border: none;
+  background: transparent;
+  max-width: min(100%, 430px);
+}
+
+.onboarding-notice-card {
+  position: relative;
+  overflow: hidden;
+  padding: 16px;
+  border-radius: 20px 20px 20px 8px;
+  border: 1px solid rgba(249, 115, 22, 0.22);
+  background:
+    radial-gradient(circle at top right, rgba(251, 191, 36, 0.22), transparent 38%),
+    linear-gradient(145deg, rgba(22, 28, 45, 0.98), rgba(38, 21, 44, 0.94));
+  box-shadow: 0 18px 38px rgba(2, 6, 23, 0.34);
+}
+
+.onboarding-notice-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(249, 115, 22, 0.14);
+  color: #fdba74;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.onboarding-notice-title {
+  font-size: 1rem;
+  font-weight: 800;
+  line-height: 1.3;
+  color: #fff7ed;
+  margin-bottom: 8px;
+}
+
+.onboarding-notice-body {
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: rgba(255, 247, 237, 0.82);
+}
+
+.onboarding-notice-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.onboarding-notice-restaurant,
+.onboarding-notice-hint {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.onboarding-notice-restaurant {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.onboarding-notice-hint {
+  background: rgba(15, 23, 42, 0.46);
+  color: #cbd5e1;
 }
 
 /* ===== PRICE COMPARISON CARD ===== */
@@ -1269,23 +1539,34 @@ img {
   font-size: 0.8rem;
   font-weight: 500;
   max-width: 85%;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ai-chat-composer {
+  position: relative;
 }
 
 .ai-chat-input-row {
   display: flex;
   gap: 8px;
-  align-items: center;
+  align-items: flex-end;
 }
 
 .ai-chat-input {
   flex: 1;
   background: var(--bg-glass);
   border: 1px solid var(--border);
-  border-radius: var(--radius-full);
-  padding: 9px 16px;
+  border-radius: 18px;
+  padding: 12px 16px;
   color: var(--text-primary);
   font-size: 0.82rem;
   transition: var(--transition);
+  line-height: 1.45;
+  min-height: 44px;
+  max-height: 132px;
+  resize: none;
+  overflow-y: auto;
 }
 
 .ai-chat-input:focus {
@@ -1421,6 +1702,7 @@ img {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
   padding: 6px 12px;
   background: rgba(99, 102, 241, 0.08);
   border: 1px solid rgba(99, 102, 241, 0.2);
@@ -1482,6 +1764,16 @@ img {
   min-width: 0;
 }
 
+.voice-live {
+  width: 100%;
+  color: #bfdbfe;
+  font-style: italic;
+  font-size: 0.83rem;
+  line-height: 1.35;
+  white-space: normal;
+  word-break: break-word;
+}
+
 .voice-end-btn {
   background: none;
   border: none;
@@ -1497,11 +1789,67 @@ img {
   background: rgba(239, 68, 68, 0.1);
 }
 
+/* Tap-to-dictate mic button */
+.mic-btn.mic-btn-ptt {
+  border: 1px solid rgba(249, 115, 22, 0.35);
+  background: rgba(249, 115, 22, 0.12);
+  color: #fff7ed;
+  transition: background 0.15s, box-shadow 0.15s, transform 0.15s, border-color 0.15s;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+.mic-btn.mic-btn-ptt.idle {
+  border-color: rgba(249, 115, 22, 0.35);
+  background: rgba(249, 115, 22, 0.12);
+}
+
+.mic-btn.mic-btn-ptt.recording {
+  background: rgba(239, 68, 68, 0.18);
+  border-color: rgba(239, 68, 68, 0.7);
+  color: #991b1b;
+  animation: micPulse 1s ease-in-out infinite;
+  transform: scale(1.04);
+}
+
+.mic-btn.mic-btn-ptt.processing {
+  background: rgba(245, 158, 11, 0.18);
+  border-color: rgba(245, 158, 11, 0.75);
+  color: #92400e;
+  animation: none;
+}
+
+.mic-btn.mic-btn-ptt:active {
+  background: rgba(249, 115, 22, 0.24);
+  border-color: rgba(249, 115, 22, 0.8);
+  box-shadow: 0 0 0 4px rgba(249, 115, 22, 0.2);
+}
+
 /* Mic button voice-active state */
 .mic-btn.voice-active {
   background: rgba(239, 68, 68, 0.15);
   border-color: rgba(239, 68, 68, 0.4);
   animation: micPulse 1.5s ease-in-out infinite;
+}
+
+.voice-helper {
+  margin-top: 8px;
+  padding-left: 6px;
+  font-size: 0.74rem;
+  line-height: 1.35;
+  color: var(--text-dim);
+  transition: color 0.15s ease;
+}
+
+.voice-helper.recording {
+  color: #b91c1c;
+  font-weight: 600;
+}
+
+.voice-helper.processing {
+  color: #b45309;
+  font-weight: 600;
 }
 
 @keyframes micPulse {
@@ -1513,6 +1861,18 @@ img {
 
   50% {
     box-shadow: 0 0 0 8px rgba(239, 68, 68, 0);
+  }
+}
+
+@media (max-width: 480px) {
+  .chat-cart-preview {
+    width: calc(100% - 24px);
+    margin-left: 12px;
+    margin-right: 12px;
+  }
+
+  .ai-chat-input {
+    font-size: 0.86rem;
   }
 }
 
