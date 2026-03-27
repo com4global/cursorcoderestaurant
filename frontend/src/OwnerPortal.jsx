@@ -639,7 +639,7 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                             onClick={handleStartTrial}
                             disabled={subLoading || (subscription && subscription.trial_expired)}
                             style={{
-                                width: '100%', padding: '12px', border: 'none', borderRadius: 10, cursor: 'pointer',
+                                width: '100%', padding: '12px', border: 'none', borderRadius: 10,
                                 background: (subscription && subscription.trial_expired) ? '#555' : 'linear-gradient(135deg, #4ade80, #22c55e)',
                                 color: (subscription && subscription.trial_expired) ? '#999' : '#000',
                                 fontWeight: 700, fontSize: '1rem', marginTop: 'auto',

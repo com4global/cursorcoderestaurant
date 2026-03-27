@@ -3,12 +3,13 @@ import { motion, AnimatePresence } from "framer-motion";
 import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, submitFeedback, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, verifyPayment, trackOrder, getRestaurantQueue, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal, fetchCategoryItems, createGroupSession, getGroupSession, joinGroupSession, getGroupRecommendation, getGroupSplitEqual } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
 import TasteProfile from "./TasteProfile.jsx";
+import AICallPage from "./AICallPage.jsx";
 import { dedupeRestaurants } from "./restaurantList.js";
 import { useVoiceController } from "./voice/useVoiceController.js";
 import { APP_QUERY_ROUTES, decideAppQueryRoute, isSelectedRestaurantSuggestionRequest } from "./voice/queryRouting.js";
 import { matchCategory, matchItem } from "./voice/voiceMatch.js";
 import { trace, traceError, traceTiming } from "./voice/trace.js";
-import { INTENTS } from "./voice/IntentParser.js";
+import { INTENTS, parseIntent, shouldBypassGlobalSearch } from "./voice/IntentParser.js";
 
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
 
@@ -312,6 +313,7 @@ export default function App() {
   const [checkingOut, setCheckingOut] = useState(false);
   const [checkoutDone, setCheckoutDone] = useState(null);
   const [paymentToast, setPaymentToast] = useState(null); // { type: 'success'|'cancel', message: string }
+  const [aiCallCheckoutReturn, setAiCallCheckoutReturn] = useState(null);
 
   // Orders
   const [myOrders, setMyOrders] = useState([]);
@@ -409,14 +411,6 @@ export default function App() {
     voiceStartListeningRef.current = () => voice.startListening();
   }, [voice.speak, voice.startListening]);
 
-  // Preload intent/state modules when voice is turned on so first voice command has no import delay
-  useEffect(() => {
-    if (voiceMode) {
-      import("./voice/IntentParser.js").catch(() => {});
-      import("./voice/ConversationState.js").catch(() => {});
-    }
-  }, [voiceMode]);
-
   // Owner
   const [showOwnerPortal, setShowOwnerPortal] = useState(() => localStorage.getItem("userRole") === "owner");
   const [userRole, setUserRole] = useState(() => localStorage.getItem("userRole") || "customer");
@@ -474,11 +468,30 @@ export default function App() {
   // ===================== EFFECTS =====================
 
   useEffect(() => {
-    if (token) {
-      localStorage.setItem("token", token);
-      fetchCart(token).then(setCartData).catch(() => { });
-      fetchMyOrders(token).then(setMyOrders).catch(() => { });
-    }
+    if (!token) return;
+
+    let cancelled = false;
+    const handleBootstrapAuthError = (error) => {
+      if (cancelled || error?.status !== 401) return;
+      console.warn("[AuthBootstrap] Clearing stale token after unauthorized bootstrap request", { message: error?.message });
+      localStorage.removeItem("token");
+      setToken("");
+      setCartData(null);
+      setMyOrders([]);
+      setStatus("Session expired. Please log in again.");
+    };
+
+    localStorage.setItem("token", token);
+    fetchCart(token).then((data) => {
+      if (!cancelled) setCartData(data);
+    }).catch(handleBootstrapAuthError);
+    fetchMyOrders(token).then((orders) => {
+      if (!cancelled) setMyOrders(orders);
+    }).catch(handleBootstrapAuthError);
+
+    return () => {
+      cancelled = true;
+    };
   }, [token]);
 
   useEffect(() => {
@@ -517,17 +530,29 @@ export default function App() {
     const payment = params.get('payment');
     const sessionId = params.get('session_id');
     if (!payment) return;
+    let aiCallContext = null;
+    try {
+      aiCallContext = JSON.parse(localStorage.getItem('aiCallCheckoutContext') || 'null');
+    } catch {
+      aiCallContext = null;
+    }
 
     // Clean URL immediately so refresh doesn't re-trigger
     window.history.replaceState({}, '', window.location.pathname);
 
     if (payment === 'order_success') {
-      setTab('orders');
-      setOrdersTab('current');
+      if (aiCallContext?.sessionId) {
+        setTab('call');
+        setAiCallCheckoutReturn({ status: 'success', sessionId: aiCallContext.sessionId });
+      } else {
+        setTab('orders');
+        setOrdersTab('current');
+      }
       setCartData(null);
       setShowCartPanel(false);
       setPaymentToast({ type: 'success', message: '✅ Payment successful! Your order has been confirmed.' });
       setTimeout(() => setPaymentToast(null), 8000);
+      localStorage.removeItem('aiCallCheckoutContext');
 
       // Verify payment and confirm orders on the backend
       const storedToken = token || localStorage.getItem('token');
@@ -540,8 +565,13 @@ export default function App() {
         fetchMyOrders(storedToken).then(setMyOrders).catch(() => { });
       }
     } else if (payment === 'order_cancel') {
+      if (aiCallContext?.sessionId) {
+        setTab('call');
+        setAiCallCheckoutReturn({ status: 'cancel', sessionId: aiCallContext.sessionId });
+      }
       setPaymentToast({ type: 'cancel', message: '❌ Payment was cancelled. Your items are still in the cart.' });
       setTimeout(() => setPaymentToast(null), 6000);
+      localStorage.removeItem('aiCallCheckoutContext');
     }
   }, []); // Run once on mount
 
@@ -891,7 +921,6 @@ export default function App() {
     let intentResult = null;
     if (!skipIntentSearch) {
       const importT0 = performance.now();
-      const { parseIntent, buildSearchQuery, shouldBypassGlobalSearch, shouldUseDiscoverySearch } = await import("./voice/IntentParser.js");
       const { applyUpdate, buildQuery, createState, describeFilters, resetForNewSearch } = await import("./voice/ConversationState.js");
       traceTiming('voice.intentImport', importT0);
 
@@ -1873,9 +1902,9 @@ export default function App() {
 
   const cartItemCount = cartData?.restaurants?.reduce((t, g) => t + g.items.reduce((s, i) => s + i.quantity, 0), 0) || 0;
   const cartTotal = cartData?.grand_total_cents ? (cartData.grand_total_cents / 100).toFixed(2) : "0.00";
-  const cartPreviewGroup = cartData?.restaurants?.length ? cartData.restaurants[cartData.restaurants.length - 1] : null;
-  const cartPreviewItems = cartPreviewGroup?.items?.slice(-3) || [];
-  const cartPreviewExtraCount = Math.max((cartPreviewGroup?.items?.length || 0) - cartPreviewItems.length, 0);
+  const cartPreviewGroup = cartData?.restaurants?.length ? cartData.restaurants[0] : null;
+  const cartPreviewItems = cartData?.restaurants?.flatMap(r => r.items)?.slice(-3) || [];
+  const cartPreviewExtraCount = Math.max((cartData?.restaurants?.reduce((acc, r) => acc + r.items.length, 0) || 0) - cartPreviewItems.length, 0);
 
   const micButtonStateClass = voiceState === "listening"
     ? "recording"
@@ -2005,6 +2034,22 @@ export default function App() {
                 </div>
               </motion.div>
             )}
+
+            <motion.div
+              className="ai-call-entry-card"
+              initial={{ opacity: 0, y: 18 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.12 }}
+            >
+              <div className="ai-call-entry-copy">
+                <span className="ai-call-entry-badge">AI CALL</span>
+                <div className="ai-call-entry-title">Prefer speaking instead of typing?</div>
+                <div className="ai-call-entry-text">
+                  Open the separate voice-first ordering page and talk to the assistant in Tamil or English.
+                </div>
+              </div>
+              <button className="ai-call-entry-btn" onClick={() => setTab("call")}>Open AI Call</button>
+            </motion.div>
 
             {/* Budget Optimizer Floating Button */}
             <motion.button
@@ -2171,7 +2216,7 @@ export default function App() {
                       <span className="chat-cart-preview-eyebrow">Current order</span>
                       <span className="chat-cart-preview-total">${cartTotal}</span>
                     </div>
-                    <div className="chat-cart-preview-restaurant">{cartPreviewGroup.restaurant_name}</div>
+                    <div className="chat-cart-preview-restaurant">{cartData.restaurants.length > 1 ? "Multiple Restaurants" : cartPreviewGroup.restaurant_name}</div>
                     <div className="chat-cart-preview-items">
                       {cartPreviewItems.map((item) => (
                         <span key={item.order_item_id || `${item.name}-${item.quantity}`} className="chat-cart-preview-chip">
@@ -2557,6 +2602,26 @@ export default function App() {
               </>
             )}
           </div>
+        )}
+
+        {tab === "call" && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.25 }}>
+            <AICallPage
+              token={token}
+              onRequireAuth={() => setTab("profile")}
+              onCartUpdated={setCartData}
+              checkoutReturnContext={aiCallCheckoutReturn}
+              onCheckoutReturnHandled={() => setAiCallCheckoutReturn(null)}
+              userLat={userLat}
+              userLng={userLng}
+              radiusMiles={radius}
+              onOrdersUpdated={async () => {
+                if (!token) return;
+                const orders = await fetchMyOrders(token);
+                setMyOrders(orders);
+              }}
+            />
+          </motion.div>
         )}
 
         {/* ====== ORDERS TAB ====== */}
@@ -3368,6 +3433,10 @@ export default function App() {
         <button className={`nav-item ${tab === "home" ? "active" : ""}`} onClick={() => setTab("home")}>
           <span className="nav-icon">🏠</span>
           <span>Home</span>
+        </button>
+        <button className={`nav-item ${tab === "call" ? "active" : ""}`} onClick={() => setTab("call")}>
+          <span className="nav-icon">📞</span>
+          <span>Call</span>
         </button>
         <button className={`nav-item ${tab === "chat" ? "active" : ""}`} onClick={() => setTab("chat")}>
           <span className="nav-icon">💬</span>

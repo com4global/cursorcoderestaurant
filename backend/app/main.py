@@ -20,6 +20,8 @@ from .config import settings
 from .db import get_db, engine
 from .voice import router as voice_router
 from .ai_dashboard import router as ai_dashboard_router
+from .call_order import router as call_order_router
+from .ai_call_realtime import router as ai_call_realtime_router
 
 try:
     models.Base.metadata.create_all(bind=engine)
@@ -148,6 +150,8 @@ except Exception as e:
 app = FastAPI(title="RestarentAI")
 app.include_router(voice_router)
 app.include_router(ai_dashboard_router)
+app.include_router(call_order_router)
+app.include_router(ai_call_realtime_router)
 
 app.add_middleware(
     CORSMiddleware,

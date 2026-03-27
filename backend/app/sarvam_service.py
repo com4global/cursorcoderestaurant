@@ -8,6 +8,7 @@ import base64
 import io
 import json
 import os
+import time
 import urllib.request
 import urllib.error
 
@@ -16,6 +17,27 @@ load_dotenv()
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 SARVAM_BASE = "https://api.sarvam.ai"
+SARVAM_REQUEST_TIMEOUT_SECONDS = float(os.getenv("SARVAM_REQUEST_TIMEOUT_SECONDS", "30"))
+SARVAM_RETRY_COUNT = max(0, int(os.getenv("SARVAM_RETRY_COUNT", "1")))
+
+
+def _read_json_response(req: urllib.request.Request) -> dict:
+    attempts = SARVAM_RETRY_COUNT + 1
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=SARVAM_REQUEST_TIMEOUT_SECONDS) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts - 1:
+                break
+            time.sleep(0.5 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Sarvam request failed without a response")
 
 
 def transcribe_audio(audio_bytes: bytes, filename: str = "audio.webm", language_code: str = "en-IN") -> dict:
@@ -68,12 +90,11 @@ def transcribe_audio(audio_bytes: bytes, filename: str = "audio.webm", language_
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-            return {
-                "transcript": data.get("transcript", ""),
-                "language": data.get("language_code", "en-IN"),
-            }
+        data = _read_json_response(req)
+        return {
+            "transcript": data.get("transcript", ""),
+            "language": data.get("language_code", "en-IN"),
+        }
     except urllib.error.HTTPError as e:
         error_body = e.read().decode() if e.fp else str(e)
         raise RuntimeError(f"Sarvam STT error ({e.code}): {error_body}")
@@ -111,15 +132,13 @@ def generate_speech(
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-            # Sarvam returns {"audios": ["base64..."]}
-            audios = data.get("audios", [])
-            audio_b64 = audios[0] if audios else ""
-            return {
-                "audio_base64": audio_b64,
-                "format": "wav",
-            }
+        data = _read_json_response(req)
+        audios = data.get("audios", [])
+        audio_b64 = audios[0] if audios else ""
+        return {
+            "audio_base64": audio_b64,
+            "format": "wav",
+        }
     except urllib.error.HTTPError as e:
         error_body = e.read().decode() if e.fp else str(e)
         raise RuntimeError(f"Sarvam TTS error ({e.code}): {error_body}")
@@ -164,16 +183,14 @@ def chat_completion(
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-            choices = data.get("choices", [])
-            if choices:
-                content = choices[0].get("message", {}).get("content", "")
-                # Strip <think> and </think> tags (Sarvam prefixes responses with <think>)
-                import re
-                content = re.sub(r"</?think>", "", content).strip()
-                return content
-            return ""
+        data = _read_json_response(req)
+        choices = data.get("choices", [])
+        if choices:
+            content = choices[0].get("message", {}).get("content", "")
+            import re
+            content = re.sub(r"</?think>", "", content).strip()
+            return content
+        return ""
     except urllib.error.HTTPError as e:
         error_body = e.read().decode() if e.fp else str(e)
         raise RuntimeError(f"Sarvam chat error ({e.code}): {error_body}")
