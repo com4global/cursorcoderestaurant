@@ -1006,14 +1006,52 @@ export default function AICallPage({
       return;
     }
     realtimeFallbackInProgressRef.current = true;
-    logAICallError("realtime:fallback", realtimeError, { sessionId: session?.session_id });
-    setStatusMessage("Realtime AI Call is unavailable. Switching to standard voice mode...");
+    const failedProvider = String(realtimeProviderName || session?.realtime?.provider?.name || "").toLowerCase();
+    logAICallError("realtime:fallback", realtimeError, { sessionId: session?.session_id, failedProvider });
 
     try {
       await cleanupRealtimeRuntime({ skipStop: true });
+      clearInterval(draftPollRef.current);
+      draftPollRef.current = null;
       setIsRealtimeCall(false);
       setRealtimeProviderName("");
       setIsRealtimeMuted(false);
+
+      // If Retell failed and Vapi fallback credentials exist, try Vapi first.
+      const fallbackConfig = session?.realtime?.provider?.fallback;
+      if (failedProvider === "retell" && fallbackConfig?.name === "vapi" && fallbackConfig?.public_key) {
+        setStatusMessage("Retell is unavailable. Trying Vapi...");
+        logAICall("realtime:fallback-vapi-attempt", { sessionId: session?.session_id });
+        try {
+          const vapiSession = {
+            ...session,
+            realtime: {
+              ...session.realtime,
+              enabled: true,
+              provider: {
+                ...session.realtime.provider,
+                name: "vapi",
+                public_key: fallbackConfig.public_key,
+                assistant_id: fallbackConfig.assistant_id,
+                assistant_ids: fallbackConfig.assistant_ids,
+                server_url: fallbackConfig.server_url || "",
+                fallback: null, // prevent recursive fallback
+              },
+            },
+          };
+          await connectRealtimeCall(vapiSession);
+          logAICall("realtime:fallback-vapi-success", { sessionId: session?.session_id });
+          return;
+        } catch (vapiError) {
+          logAICallError("realtime:fallback-vapi-failed", vapiError, { sessionId: session?.session_id });
+          await cleanupRealtimeRuntime({ skipStop: true });
+          setIsRealtimeCall(false);
+          setRealtimeProviderName("");
+          setIsRealtimeMuted(false);
+        }
+      }
+
+      setStatusMessage("Realtime AI Call is unavailable. Switching to standard voice mode...");
       await connectLocalCall(session);
       setStatusMessage("Switched to standard voice mode. Speak naturally when you are ready.");
     } finally {

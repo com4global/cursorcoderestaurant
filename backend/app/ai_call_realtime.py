@@ -131,7 +131,7 @@ def _provider_config() -> dict:
         if not assistant_id_en:
             missing_fields.append("assistant_id")
 
-    return {
+    result = {
         "name": provider_name,
         "enabled": bool(settings.ai_call_realtime_enabled),
         "public_key": settings.ai_call_provider_public_key,
@@ -151,6 +151,22 @@ def _provider_config() -> dict:
         "missing_fields": missing_fields,
         "server_url": settings.retell_server_url if provider_name == "retell" else settings.vapi_server_url,
     }
+
+    # When primary is Retell, expose Vapi as fallback so the frontend can
+    # attempt Vapi before dropping to local-only voice mode.
+    if provider_name == "retell" and settings.ai_call_provider_public_key and assistant_id_en:
+        result["fallback"] = {
+            "name": "vapi",
+            "public_key": settings.ai_call_provider_public_key,
+            "assistant_id": settings.ai_call_provider_assistant_id,
+            "assistant_ids": {
+                "en-IN": assistant_id_en,
+                "ta-IN": assistant_id_ta,
+            },
+            "server_url": settings.vapi_server_url,
+        }
+
+    return result
 
 
 def _tool_catalog() -> list[dict]:
