@@ -4,5 +4,9 @@
 <dict>
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>RestaurantAI needs your location to find nearby restaurants.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>RestaurantAI needs microphone access for voice ordering.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>RestaurantAI uses speech recognition to understand your food orders.</string>
 </dict>
 </plist>

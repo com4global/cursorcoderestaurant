@@ -240,7 +240,8 @@ const welcomeMsg = {
   content: "Hello! Pick a restaurant from the Home tab, then browse menus and add items here.",
 };
 
-const API = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || "http://localhost:8000");
+const PROD_API_BASE = "https://backend-iota-navy-64.vercel.app";
+const API = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || PROD_API_BASE);
 
 export default function App() {
   // Active tab
@@ -1076,7 +1077,7 @@ export default function App() {
           // Categories empty — fetch via REST then fallback to 'show menu'
           if (selectRes.restaurant_id != null) {
             try {
-              const apiBase = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || "http://localhost:8000");
+              const apiBase = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || PROD_API_BASE);
               const catRes = await fetch(`${apiBase}/restaurants/${selectRes.restaurant_id}/categories`);
               if (catRes.ok) {
                 const cats = await catRes.json();
@@ -1335,7 +1336,7 @@ export default function App() {
         if (selectedRestaurant && queryRoute === APP_QUERY_ROUTES.BROWSE_CATEGORIES && activeCategories.length === 0) {
           setStatus("Loading menu...");
 
-          const apiBase = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || "http://localhost:8000");
+          const apiBase = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || PROD_API_BASE);
 
           try {
             const categoryResponse = await fetch(`${apiBase}/restaurants/${selectedRestaurant.id}/categories`);
@@ -1721,7 +1722,7 @@ export default function App() {
     setCurrentItems([]);
     setStatus("Loading menu...");
 
-    const apiBase = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || "http://localhost:8000");
+    const apiBase = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || PROD_API_BASE);
     const menuOnboardingMessage = buildMenuOnboardingMessage(resolved.name);
     const menuOnboardingNotice = buildMenuOnboardingNotice(resolved.name);
 

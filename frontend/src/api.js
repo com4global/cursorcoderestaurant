@@ -1,5 +1,7 @@
-// In dev, use same origin so Vite proxy forwards to backend (no CORS); in prod use env or default
-const API_BASE = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || "http://localhost:8000");
+// In dev, use same origin so Vite proxy forwards to backend (no CORS).
+// In prod (including iOS), localhost is not reachable from device, so use hosted backend by default.
+const PROD_API_BASE = "https://backend-iota-navy-64.vercel.app";
+const API_BASE = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || PROD_API_BASE);
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, options);
@@ -392,6 +394,14 @@ export async function fetchCallOrderAdminSummary(token) {
 
 export async function createAICallRealtimeSession(payload = {}) {
   return request("/api/call-order/realtime/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function createRetellWebCall(payload = {}) {
+  return request("/api/call-order/realtime/create-web-call", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

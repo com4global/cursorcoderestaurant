@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://localhost:8000 https://backend-mu-blush-55.vercel.app https://overpass-api.de https://nominatim.openstreetmap.org https://api.bigdatacloud.net https://api.zippopotam.us ws://localhost:5173; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval'"
+      "csp": "default-src 'self'; connect-src 'self' http://localhost:8000 https://backend-mu-blush-55.vercel.app https://backend-iota-navy-64.vercel.app https://api.vapi.ai wss://api.vapi.ai https://*.vapi.ai wss://*.vapi.ai https://api.retellai.com wss://api.retellai.com https://*.retellai.com wss://*.retellai.com https://*.daily.co wss://*.daily.co https://overpass-api.de https://nominatim.openstreetmap.org https://api.bigdatacloud.net https://api.zippopotam.us ws://localhost:5173; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; media-src 'self' blob: mediastream:"
     }
   },
   "bundle": {

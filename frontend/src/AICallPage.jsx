@@ -11,13 +11,14 @@ import {
   callOrderTurn,
   createAICallRealtimeSession,
   createCheckoutSession,
+  createRetellWebCall,
   fetchCart,
   finalizeCallOrderSession,
   getCallOrderSession,
   voiceSTT,
   voiceTTS,
 } from "./api.js";
-import { createVapiCallRuntime, parseVapiMessage } from "./aiCall/vapiRuntime.js";
+import { createRealtimeCallRuntime, parseRealtimeProviderMessage } from "./aiCall/realtimeRuntime.js";
 import {
   AI_CALL_STATES,
   buildRealtimeAssistantConfig,
@@ -79,6 +80,30 @@ function logAICallError(event, error, details = {}) {
   });
 }
 
+function isMicrophoneError(error) {
+  const name = String(error?.name || "");
+  return (
+    name === "NotAllowedError"
+    || name === "NotFoundError"
+    || name === "NotReadableError"
+    || name === "OverconstrainedError"
+    || name === "AbortError"
+    || name === "SecurityError"
+  );
+}
+
+function isBackendConnectionError(error) {
+  const name = String(error?.name || "");
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    name === "TypeError"
+    || message.includes("failed to fetch")
+    || message.includes("networkerror")
+    || message.includes("network request failed")
+    || message.includes("cors")
+  );
+}
+
 export default function AICallPage({
   token = "",
   onRequireAuth,
@@ -134,6 +159,7 @@ export default function AICallPage({
   const realtimeModeRef = useRef(false);
   const realtimeDisconnectingRef = useRef(false);
   const realtimeMismatchHandledRef = useRef(false);
+  const realtimeFallbackInProgressRef = useRef(false);
   const handledRealtimeToolCallsRef = useRef(new Set());
   const vapiServerUrlRef = useRef("");
   const transcriptEndRef = useRef(null);
@@ -228,6 +254,7 @@ export default function AICallPage({
     const nextSessionId = String(session?.session_id || session?.id || "");
     sessionIdRef.current = nextSessionId;
     setSessionId(nextSessionId);
+    connectedRef.current = true; // set immediately so error/fallback handlers see it synchronously
     setIsConnected(true);
     setCallState(connectedState);
     setStatusMessage(statusText || "Your AI call is connected. I am listening when you speak.");
@@ -245,11 +272,22 @@ export default function AICallPage({
   function isRealtimeSessionEnabled(session) {
     const provider = session?.realtime?.provider;
     const normalizedLanguage = normalizeCallLanguage(language);
+    const providerName = String(provider?.name || "").toLowerCase();
     const assistantId = provider?.assistant_ids?.[normalizeCallLanguage(language)] || provider?.assistant_id;
+    const agentId = provider?.agent_ids?.[normalizeCallLanguage(language)] || provider?.agent_id;
+
+    if (providerName === "retell") {
+      return Boolean(
+        normalizedLanguage === "en-IN"
+        && session?.realtime?.enabled
+        && agentId
+      );
+    }
+
     return Boolean(
       normalizedLanguage === "en-IN" &&
       session?.realtime?.enabled
-      && provider?.name === "vapi"
+      && providerName === "vapi"
       && provider?.public_key
       && assistantId
     );
@@ -290,7 +328,7 @@ export default function AICallPage({
       textPreview: String(text || "").slice(0, 160),
     });
     void disconnectCall({
-      finalStatusMessage: getWrongDomainAssistantMessage(),
+      finalStatusMessage: getWrongDomainAssistantMessage(realtimeProviderName || "vapi"),
     });
   }
 
@@ -372,17 +410,28 @@ export default function AICallPage({
     if (!realtimeCallRef.current) return;
     const compacted = compactToolResult(toolCall.name, payload);
     const content = JSON.stringify(compacted);
+    const providerName = String(realtimeProviderName || "vapi").toLowerCase();
     logAICall("realtime:tool-call-result", {
       sessionId: sessionIdRef.current,
       toolCallId: toolCall.id,
       name: toolCall.name,
+      provider: providerName,
       resultKeys: payload && typeof payload === "object" ? Object.keys(payload) : [],
       restaurantCount: Array.isArray(payload?.restaurants) ? payload.restaurants.length : undefined,
       contentBytes: content.length,
     });
-    // Tools are async: true, so Vapi's server does NOT block waiting for a
-    // webhook result. We send the result via add-message with role="tool" and
-    // triggerResponseEnabled=true so the model sees the data and responds.
+
+    if (providerName === "retell") {
+      realtimeCallRef.current.send({
+        type: "tool_result",
+        toolCallId: toolCall.id,
+        name: toolCall.name,
+        result: content,
+      });
+      return;
+    }
+
+    // Vapi: tools are async, so send tool result back via add-message and trigger response.
     realtimeCallRef.current.send({
       type: "add-message",
       message: {
@@ -566,7 +615,7 @@ export default function AICallPage({
   }
 
   function handleRealtimeMessage(message) {
-    const parsed = parseVapiMessage(message);
+    const parsed = parseRealtimeProviderMessage(realtimeProviderName || "vapi", message);
     logAICall("realtime:message", {
       type: parsed.type,
       status: parsed.status,
@@ -618,6 +667,9 @@ export default function AICallPage({
     void handleRealtimeToolCalls(message);
 
     if (parsed.type === "status-update" && parsed.status === "ended" && connectedRef.current) {
+      void disconnectCall({ skipRealtimeStop: true });
+    }
+    if ((parsed.type === "call_ended" || parsed.type === "call-ended") && connectedRef.current) {
       void disconnectCall({ skipRealtimeStop: true });
     }
   }
@@ -945,12 +997,34 @@ export default function AICallPage({
     logAICall("tts:playing", { language: langCode, bytes: blob.size });
   }
 
+  async function fallbackToLocalVoiceMode(session, realtimeError) {
+    if (realtimeFallbackInProgressRef.current || realtimeDisconnectingRef.current) {
+      return;
+    }
+    realtimeFallbackInProgressRef.current = true;
+    logAICallError("realtime:fallback", realtimeError, { sessionId: session?.session_id });
+    setStatusMessage("Realtime AI Call is unavailable. Switching to standard voice mode...");
+
+    try {
+      await cleanupRealtimeRuntime({ skipStop: true });
+      setIsRealtimeCall(false);
+      setRealtimeProviderName("");
+      setIsRealtimeMuted(false);
+      await connectLocalCall(session);
+      setStatusMessage("Switched to standard voice mode. Speak naturally when you are ready.");
+    } finally {
+      realtimeFallbackInProgressRef.current = false;
+    }
+  }
+
   async function connectRealtimeCall(session) {
     const provider = session?.realtime?.provider || {};
+    const providerName = String(provider?.name || "vapi").toLowerCase();
     const normalizedLanguage = normalizeCallLanguage(language);
     const assistantId = provider?.assistant_ids?.[normalizedLanguage] || provider?.assistant_id;
+    const agentId = provider?.agent_ids?.[normalizedLanguage] || provider?.agent_id;
     const vapiServerUrl = provider?.server_url || "";
-    const inlineAssistant = normalizedLanguage === "en-IN"
+    const inlineAssistant = providerName === "vapi" && normalizedLanguage === "en-IN"
       ? buildRealtimeAssistantConfig(normalizedLanguage, session?.session_id, vapiServerUrl)
       : null;
     vapiServerUrlRef.current = vapiServerUrl;
@@ -970,15 +1044,43 @@ export default function AICallPage({
       },
     };
 
-    if (!inlineAssistant && !assistantId) {
+    if (providerName === "vapi" && !inlineAssistant && !assistantId) {
       throw new Error(`Realtime AI Call is missing a Vapi assistant for ${normalizedLanguage}.`);
     }
+    if (providerName === "retell" && !agentId) {
+      throw new Error(`Realtime AI Call is missing a Retell agent for ${normalizedLanguage}.`);
+    }
 
-    const runtime = createVapiCallRuntime({
+    let retellAccessToken = null;
+    if (providerName === "retell") {
+      const webCall = await createRetellWebCall({
+        session_id: session?.session_id,
+        language: normalizedLanguage,
+        metadata: {
+          sessionId: session?.session_id,
+          source: "restaurantai-ai-call",
+          language: normalizedLanguage,
+        },
+      });
+      retellAccessToken = webCall?.access_token;
+      if (!retellAccessToken) {
+        throw new Error("Failed to obtain Retell access token.");
+      }
+    }
+
+    const runtime = createRealtimeCallRuntime({
+      providerName,
       publicKey: provider.public_key,
       assistant: inlineAssistant,
       assistantId,
       assistantOverrides,
+      agentId,
+      accessToken: retellAccessToken,
+      metadata: {
+        sessionId: session?.session_id,
+        source: "restaurantai-ai-call",
+        language: normalizedLanguage,
+      },
       onCallStart: () => {
         setCallState(AI_CALL_STATES.LISTENING);
         setStatusMessage("AI Call connected. Speak naturally when you are ready.");
@@ -998,7 +1100,11 @@ export default function AICallPage({
       },
       onMessage: handleRealtimeMessage,
       onError: (error) => {
-        logAICallError("realtime:error", error, { sessionId: session?.session_id, provider: provider.name || "vapi" });
+        logAICallError("realtime:error", error, { sessionId: session?.session_id, provider: providerName });
+        if (connectedRef.current) {
+          void fallbackToLocalVoiceMode(session, error);
+          return;
+        }
         setCallState(AI_CALL_STATES.ERROR);
         setStatusMessage(error?.message || "Realtime AI Call hit an error.");
       },
@@ -1007,10 +1113,11 @@ export default function AICallPage({
     realtimeCallRef.current = runtime;
     realtimeDisconnectingRef.current = false;
     realtimeMismatchHandledRef.current = false;
+    realtimeFallbackInProgressRef.current = false;
     handledRealtimeToolCallsRef.current = new Set();
     setIsRealtimeCall(true);
     setIsRealtimeMuted(false);
-    setRealtimeProviderName(String(provider.name || "vapi"));
+    setRealtimeProviderName(providerName);
     setIsHandsFreeEnabled(true);
     applyConnectedSession(session, { statusText: "Connecting your AI call...", connectedState: AI_CALL_STATES.READY });
 
@@ -1018,11 +1125,13 @@ export default function AICallPage({
       await runtime.start();
       logAICall("realtime:started", {
         sessionId: session?.session_id,
-        provider: provider.name || "vapi",
-        assistantId: inlineAssistant ? "inline-restaurant-assistant" : assistantId,
+        provider: providerName,
+        assistantId: providerName === "retell"
+          ? agentId
+          : (inlineAssistant ? "inline-restaurant-assistant" : assistantId),
         language: normalizedLanguage,
       });
-      if (!inlineAssistant) {
+      if (providerName === "vapi" && !inlineAssistant) {
         runtime.send({
           type: "add-message",
           message: {
@@ -1068,25 +1177,39 @@ export default function AICallPage({
       logAICall("connect:start", { language });
       const session = await createAICallRealtimeSession({ language });
       const normalizedLanguage = normalizeCallLanguage(language);
+      const providerName = String(session?.realtime?.provider?.name || "vapi").toLowerCase();
       if (isRealtimeSessionEnabled(session)) {
-        await connectRealtimeCall(session);
-        return;
+        try {
+          await connectRealtimeCall(session);
+          return;
+        } catch (realtimeError) {
+          await fallbackToLocalVoiceMode(session, realtimeError);
+          return;
+        }
       }
       if (normalizedLanguage === "ta-IN" && session?.realtime?.enabled) {
-        setStatusMessage("Tamil AI Call currently uses the local Sarvam voice path because Vapi does not support Tamil well enough yet.");
+        setStatusMessage(`Tamil AI Call currently uses the local Sarvam voice path because ${providerName} does not support Tamil well enough yet.`);
       }
       if (session?.realtime?.enabled && Array.isArray(session?.realtime?.provider?.missing_fields) && session.realtime.provider.missing_fields.length > 0) {
         setStatusMessage(
-          `Realtime AI Call is enabled but missing Vapi ${session.realtime.provider.missing_fields.join(", ")}. Falling back to local voice mode.`
+          `Realtime AI Call is enabled but missing ${providerName} ${session.realtime.provider.missing_fields.join(", ")}. Falling back to local voice mode.`
         );
       }
       await connectLocalCall(session);
     } catch (error) {
       logAICallError("connect:error", error, { language });
       setCallState(AI_CALL_STATES.ERROR);
-      setStatusMessage(error?.name === "NotAllowedError"
-        ? "Microphone access is blocked. Enable it to use AI Call."
-        : "Microphone is not available on this device.");
+      if (isMicrophoneError(error)) {
+        setStatusMessage(
+          error?.name === "NotAllowedError"
+            ? "Microphone access is blocked. Enable it to use AI Call."
+            : "Microphone is not available on this device."
+        );
+      } else if (isBackendConnectionError(error)) {
+        setStatusMessage("Unable to reach backend. Check API base URL and network connectivity.");
+      } else {
+        setStatusMessage(error?.message || "Unable to start AI Call.");
+      }
     }
   }
 

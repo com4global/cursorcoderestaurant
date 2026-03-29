@@ -19,8 +19,14 @@ class Settings(BaseSettings):
     ai_call_provider_assistant_id_en: str | None = None
     ai_call_provider_assistant_id_ta: str | None = None
     ai_call_provider_phone_number_id: str | None = None
+    ai_call_provider_agent_id: str | None = None
+    ai_call_provider_agent_id_en: str | None = None
+    ai_call_provider_agent_id_ta: str | None = None
     vapi_server_url: str | None = None
     vapi_webhook_secret: str | None = None
+    retell_server_url: str | None = None
+    retell_webhook_secret: str | None = None
+    retell_api_key: str | None = None
     openai_api_key: str | None = None
 
     model_config = {"env_file": ".env", "extra": "ignore"}

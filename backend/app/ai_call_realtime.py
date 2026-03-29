@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 import json
 import logging
 import math
@@ -114,15 +115,24 @@ def _get_or_create_call_session(db: Session, session_id: str | None, language: s
 
 
 def _provider_config() -> dict:
+    provider_name = str(settings.ai_call_provider or "vapi").strip().lower() or "vapi"
     assistant_id_en = settings.ai_call_provider_assistant_id_en or settings.ai_call_provider_assistant_id
     assistant_id_ta = settings.ai_call_provider_assistant_id_ta or settings.ai_call_provider_assistant_id
+    agent_id_en = settings.ai_call_provider_agent_id_en or settings.ai_call_provider_agent_id
+    agent_id_ta = settings.ai_call_provider_agent_id_ta or settings.ai_call_provider_agent_id
     missing_fields: list[str] = []
-    if not settings.ai_call_provider_public_key:
-        missing_fields.append("public_key")
-    if not assistant_id_en:
-        missing_fields.append("assistant_id")
+
+    if provider_name == "retell":
+        if not agent_id_en:
+            missing_fields.append("agent_id")
+    else:
+        if not settings.ai_call_provider_public_key:
+            missing_fields.append("public_key")
+        if not assistant_id_en:
+            missing_fields.append("assistant_id")
+
     return {
-        "name": settings.ai_call_provider,
+        "name": provider_name,
         "enabled": bool(settings.ai_call_realtime_enabled),
         "public_key": settings.ai_call_provider_public_key,
         "assistant_id": settings.ai_call_provider_assistant_id,
@@ -130,11 +140,16 @@ def _provider_config() -> dict:
             "en-IN": assistant_id_en,
             "ta-IN": assistant_id_ta,
         },
+        "agent_id": settings.ai_call_provider_agent_id,
+        "agent_ids": {
+            "en-IN": agent_id_en,
+            "ta-IN": agent_id_ta,
+        },
         "phone_number_id": settings.ai_call_provider_phone_number_id,
         "transport": "managed-provider",
         "configured": len(missing_fields) == 0,
         "missing_fields": missing_fields,
-        "server_url": settings.vapi_server_url,
+        "server_url": settings.retell_server_url if provider_name == "retell" else settings.vapi_server_url,
     }
 
 
@@ -531,13 +546,13 @@ def get_ai_call_provider_config():
 # Docs: https://docs.vapi.ai/tools/custom-tools
 # ---------------------------------------------------------------------------
 
-def _execute_vapi_tool(
+def _execute_realtime_tool(
     name: str,
     arguments: dict,
     session_id: str,
     db: Session,
 ) -> dict:
-    """Dispatch a Vapi tool call to the matching backend handler."""
+    """Dispatch a realtime provider tool call to the matching backend handler."""
     if name == "list_restaurants":
         session = _get_or_create_call_session(db, session_id, "en-IN")
         restaurants = crud.list_restaurants(db)
@@ -575,11 +590,24 @@ def _execute_vapi_tool(
 
     if name == "get_restaurant_menu":
         _get_or_create_call_session(db, session_id, "en-IN")
-        restaurant_id = int(arguments.get("restaurant_id", 0))
+        restaurant_id = arguments.get("restaurant_id")
+        restaurant_name = str(arguments.get("restaurant_name") or "")
         query = str(arguments.get("query") or "")
-        restaurant = db.query(models.Restaurant).filter(models.Restaurant.id == restaurant_id).first()
+        restaurant = None
+        if restaurant_id is not None:
+            try:
+                restaurant = db.query(models.Restaurant).filter(models.Restaurant.id == int(restaurant_id)).first()
+            except (ValueError, TypeError):
+                pass
+        if not restaurant and restaurant_name:
+            candidates = _restaurant_candidates(db, restaurant_name)
+            if candidates:
+                restaurant = db.query(models.Restaurant).filter(models.Restaurant.id == candidates[0]["id"]).first()
         if not restaurant:
-            return {"error": "Restaurant not found"}
+            return {
+                "error": "Restaurant not found",
+                "instruction": "Tell the user you could not find that restaurant. Ask them to say 'list restaurants' to see available options.",
+            }
         categories_payload: list[dict] = []
         for cat in crud.list_categories(db, restaurant.id):
             items = crud.list_items(db, cat.id)
@@ -588,7 +616,13 @@ def _execute_vapi_tool(
                 "name": cat.name,
                 "items": [{"id": i.id, "name": i.name, "price_cents": i.price_cents} for i in items[:5]],
             })
-        suggestions = _item_candidates(db, query, restaurant.id) if query else []
+        suggestions = _item_candidates(db, query or restaurant_name, restaurant.id) if (query or restaurant_name) else []
+        if not categories_payload and not suggestions:
+            return {
+                "status": "FAILED",
+                "error": f"Menu empty for {restaurant.name}",
+                "instruction": f"Tell the user '{restaurant.name}' does not have any menu items available. Suggest trying a different restaurant.",
+            }
         return {
             "restaurant": {"id": restaurant.id, "name": restaurant.name},
             "categories": [c for c in categories_payload[:5]],
@@ -679,7 +713,7 @@ async def vapi_tool_webhook(request: Request, db: Session = Depends(get_db)):
             tc_args = {}
 
         try:
-            result = _execute_vapi_tool(tc_name, tc_args, session_id, db)
+            result = _execute_realtime_tool(tc_name, tc_args, session_id, db)
             results.append({"toolCallId": tc_id, "result": json.dumps(result)})
         except HTTPException as exc:
             results.append({"toolCallId": tc_id, "result": json.dumps({
@@ -696,3 +730,291 @@ async def vapi_tool_webhook(request: Request, db: Session = Depends(get_db)):
             })})
 
     return {"results": results}
+
+
+def _normalize_webhook_tool_calls(body: dict, source: str) -> tuple[list[dict], str]:
+    """Extract tool call list and session id from provider webhook payloads."""
+    if source == "vapi":
+        logger.info("[_normalize_webhook_tool_calls] Vapi body: %s", body)
+        message = body.get("message", {})
+        tool_calls = message.get("toolCallList", [])
+        assistant_metadata = message.get("assistant", {}).get("metadata", {})
+        session_id = (
+            assistant_metadata.get("sessionId")
+            or assistant_metadata.get("session_id")
+            or ""
+        )
+        return tool_calls, str(session_id)
+
+    # Retell payload variations: event/object wrappers or direct function payloads.
+    payload = body.get("data", body)
+    logger.info("[_normalize_webhook_tool_calls] Retell payload: %s", payload)
+    if not isinstance(payload, dict):
+        return [], ""
+
+    # --- Extract session_id from multiple possible locations ---
+    call_info = payload.get("call", {})
+    if not isinstance(call_info, dict):
+        call_info = {}
+    call_metadata = call_info.get("metadata", {})
+    if not isinstance(call_metadata, dict):
+        call_metadata = {}
+    session_meta = payload.get("session", {}) if isinstance(payload.get("session"), dict) else {}
+    top_metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
+    assistant = payload.get("assistant", {}) if isinstance(payload.get("assistant"), dict) else {}
+    assistant_metadata = assistant.get("metadata", {}) if isinstance(assistant, dict) else {}
+    session_id = (
+        call_metadata.get("sessionId")
+        or call_metadata.get("session_id")
+        or top_metadata.get("sessionId")
+        or top_metadata.get("session_id")
+        or session_meta.get("id")
+        or session_meta.get("session_id")
+        or assistant_metadata.get("sessionId")
+        or assistant_metadata.get("session_id")
+        or payload.get("session_id")
+        or ""
+    )
+
+    tool_calls: list[dict] = []
+    candidates = []
+    candidates.extend(payload.get("toolCallList") or [])
+    candidates.extend(payload.get("tool_calls") or [])
+    candidates.extend(payload.get("toolCalls") or [])
+
+    function_call = payload.get("function_call")
+    if isinstance(function_call, dict):
+        candidates.append(function_call)
+
+    tool_call = payload.get("tool_call")
+    if isinstance(tool_call, dict):
+        candidates.append(tool_call)
+
+    # Retell Custom Function format: { args: {...}, call: {...} }
+    # The tool name is typically passed as a field or derived from the URL.
+    retell_args = payload.get("args")
+    retell_fn_name = payload.get("name") or payload.get("function_name") or payload.get("tool_name") or ""
+    if isinstance(retell_args, dict) and retell_fn_name:
+        candidates.append({"name": retell_fn_name, "arguments": retell_args, "id": call_info.get("call_id", "retell-auto")})
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        tc_id = candidate.get("id") or candidate.get("tool_call_id") or candidate.get("call_id") or ""
+        fn_name = candidate.get("name") or candidate.get("function", {}).get("name") or candidate.get("tool_name") or ""
+        fn_args = candidate.get("arguments") or candidate.get("args") or candidate.get("function", {}).get("arguments") or {}
+        tool_calls.append({"id": tc_id, "name": fn_name, "arguments": fn_args})
+
+    logger.info("[_normalize_webhook_tool_calls] Extracted tool_calls: %s, session_id: %s", tool_calls, session_id)
+    return tool_calls, str(session_id)
+
+
+def _execute_webhook_tool_calls(
+    tool_call_list: list[dict],
+    session_id: str,
+    db: Session,
+    provider_name: str,
+) -> list[dict]:
+    results = []
+    for tc in tool_call_list:
+        tc_id = tc.get("id", "")
+        tc_name = tc.get("name", "") or tc.get("function", {}).get("name", "")
+        tc_args = tc.get("arguments", {})
+        if isinstance(tc_args, str):
+            try:
+                tc_args = json.loads(tc_args)
+            except (json.JSONDecodeError, TypeError):
+                tc_args = {}
+        if not isinstance(tc_args, dict):
+            tc_args = {}
+
+        try:
+            result = _execute_realtime_tool(tc_name, tc_args, session_id, db)
+            results.append({"toolCallId": tc_id, "result": json.dumps(result)})
+        except HTTPException as exc:
+            results.append({
+                "toolCallId": tc_id,
+                "result": json.dumps({
+                    "status": "FAILED",
+                    "error": exc.detail,
+                    "instruction": "This action FAILED. Tell the caller it did not work and why. Do NOT say it succeeded.",
+                }),
+            })
+        except Exception as exc:
+            logger.exception("%s tool %s failed", provider_name, tc_name)
+            results.append({
+                "toolCallId": tc_id,
+                "result": json.dumps({
+                    "status": "FAILED",
+                    "error": str(exc),
+                    "instruction": "This action FAILED. Tell the caller it did not work and why. Do NOT say it succeeded.",
+                }),
+            })
+    return results
+
+
+@router.post("/create-web-call")
+def create_retell_web_call(payload: dict, db: Session = Depends(get_db)):
+    """Create a Retell web call and return the access_token for the frontend SDK."""
+    provider = _provider_config()
+    if provider["name"] != "retell":
+        raise HTTPException(status_code=400, detail="Provider is not Retell; web-call creation not applicable.")
+    if not settings.retell_api_key:
+        raise HTTPException(status_code=500, detail="RETELL_API_KEY is not configured.")
+
+    language = _normalize_language(payload.get("language", "en-IN"))
+    agent_id = provider["agent_ids"].get(language) or provider["agent_id"]
+    if not agent_id:
+        raise HTTPException(status_code=500, detail=f"No Retell agent configured for language {language}.")
+
+    session_id = payload.get("session_id")
+    metadata = payload.get("metadata", {})
+    if session_id:
+        metadata["session_id"] = session_id
+
+    retell_payload = {
+        "agent_id": agent_id,
+    }
+    if metadata:
+        retell_payload["metadata"] = metadata
+    retell_webhook = payload.get("webhook_url")
+    if retell_webhook:
+        retell_payload["webhook_url"] = retell_webhook
+
+    try:
+        resp = httpx.post(
+            "https://api.retellai.com/v2/create-web-call",
+            json=retell_payload,
+            headers={
+                "Authorization": f"Bearer {settings.retell_api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        logger.error("Retell create-web-call failed: %s %s", exc.response.status_code, exc.response.text)
+        raise HTTPException(status_code=502, detail="Failed to create Retell web call.") from exc
+    except httpx.RequestError as exc:
+        logger.error("Retell create-web-call request error: %s", exc)
+        raise HTTPException(status_code=502, detail="Could not reach Retell API.") from exc
+
+    data = resp.json()
+    return {
+        "access_token": data.get("access_token"),
+        "call_id": data.get("call_id"),
+        "agent_id": agent_id,
+    }
+
+
+@router.post("/retell-tool/{tool_name}")
+async def retell_custom_function_handler(tool_name: str, request: Request, db: Session = Depends(get_db)):
+    """Handle Retell Custom Function webhook calls.
+
+    Each Retell Custom Function is configured in the Retell dashboard with a URL
+    pointing to this endpoint, e.g.:
+        https://<backend>/api/call-order/realtime/retell-tool/list_restaurants
+
+    Retell sends: { args: {...}, call: { call_id, agent_id, metadata: {sessionId} } }
+    We return a plain JSON result that Retell feeds back to the LLM.
+    """
+    body = await request.json()
+    logger.info("[Retell Tool] %s called with: %s", tool_name, body)
+
+    if settings.retell_webhook_secret:
+        header_secret = (
+            request.headers.get("x-retell-signature", "")
+            or request.headers.get("x-retell-secret", "")
+        )
+        if header_secret and header_secret != settings.retell_webhook_secret:
+            raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+    # Extract args from Retell's Custom Function format
+    args = body.get("args", {})
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (json.JSONDecodeError, TypeError):
+            args = {}
+    if not isinstance(args, dict):
+        args = {}
+
+    # Extract session_id from call.metadata
+    call_info = body.get("call", {})
+    if not isinstance(call_info, dict):
+        call_info = {}
+    metadata = call_info.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    session_id = (
+        metadata.get("sessionId")
+        or metadata.get("session_id")
+        or args.pop("session_id", None)
+        or ""
+    )
+
+    if not session_id:
+        logger.warning("[Retell Tool] No session_id in metadata for %s. metadata=%s", tool_name, metadata)
+        return {
+            "error": "Missing session_id. Ensure the web call was created with sessionId in metadata.",
+            "instruction": "Tell the user there was a technical issue connecting to the ordering system.",
+        }
+
+    try:
+        result = _execute_realtime_tool(tool_name, args, str(session_id), db)
+        logger.info("[Retell Tool] %s succeeded, keys: %s", tool_name, list(result.keys()) if isinstance(result, dict) else type(result))
+        return result
+    except HTTPException as exc:
+        logger.warning("[Retell Tool] %s HTTPException: %s", tool_name, exc.detail)
+        return {
+            "status": "FAILED",
+            "error": exc.detail,
+            "instruction": "This action FAILED. Tell the caller it did not work and why.",
+        }
+    except Exception as exc:
+        logger.exception("[Retell Tool] %s failed", tool_name)
+        return {
+            "status": "FAILED",
+            "error": str(exc),
+            "instruction": "This action FAILED. Tell the caller it did not work and why.",
+        }
+
+
+@router.post("/retell-webhook")
+async def retell_tool_webhook(request: Request, db: Session = Depends(get_db)):
+    """Handle incoming Retell tool-call style webhook requests.
+
+    The payload can vary by Retell event type; this endpoint normalizes known
+    tool-call envelopes into the same internal execution path as Vapi.
+    """
+    body = await request.json()
+    logger.info("[Retell Webhook] Incoming payload: %s", body)
+
+    if settings.retell_webhook_secret:
+        header_secret = request.headers.get("x-retell-signature", "") or request.headers.get("x-retell-secret", "")
+        if header_secret != settings.retell_webhook_secret:
+            raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+    tool_call_list, session_id = _normalize_webhook_tool_calls(body, source="retell")
+    logger.info("[Retell Webhook] Normalized tool_call_list: %s, session_id: %s", tool_call_list, session_id)
+    if not tool_call_list:
+        return {"ok": True}
+    if not session_id:
+        logger.warning("Retell webhook: no session_id in payload")
+        return {
+            "results": [{"toolCallId": tc.get("id", ""), "error": "Missing session_id"} for tc in tool_call_list],
+        }
+
+    results = _execute_webhook_tool_calls(tool_call_list, session_id, db, provider_name="Retell")
+    # Return both generic and Retell-friendly keys for compatibility.
+    return {
+        "results": results,
+        "tool_results": [
+            {
+                "tool_call_id": result.get("toolCallId", ""),
+                "result": result.get("result", "{}"),
+            }
+            for result in results
+        ],
+    }

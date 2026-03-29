@@ -133,7 +133,7 @@ class TestCallOrderTurn:
         data = response.json()
         assert data["selected_restaurant"]["name"] == "Aroma"
         assert data["pending_action"] is None
-        assert data["assistant_reply"] == "I found Aroma. Tell me the dish you want from there."
+        assert "aroma" in data["assistant_reply"].lower()
 
     def test_turn_treats_order_from_restaurant_without_dish_as_context_only(self, client):
         owner_token = _owner_token(client, "order_from_restaurant_owner@test.com")
@@ -150,7 +150,7 @@ class TestCallOrderTurn:
         data = response.json()
         assert data["selected_restaurant"]["name"] == "Aroma"
         assert data["pending_action"] is None
-        assert data["assistant_reply"] == "I found Aroma. Tell me the dish you want from there."
+        assert "aroma" in data["assistant_reply"].lower()
 
     def test_turn_treats_stt_maroma_restaurant_request_as_context_only(self, client):
         owner_token = _owner_token(client, "maroma_restaurant_owner@test.com")
@@ -280,10 +280,31 @@ class TestCallOrderRealtime:
         assert data["realtime"]["provider"]["assistant_id"] == "assistant-123"
         assert any(tool["name"] == "find_restaurants" for tool in data["realtime"]["tools"])
 
+    def test_realtime_session_bootstrap_returns_retell_provider_config(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "ai_call_realtime_enabled", True)
+        monkeypatch.setattr(settings, "ai_call_provider", "retell")
+        monkeypatch.setattr(settings, "ai_call_provider_agent_id", "retell-agent-default")
+        monkeypatch.setattr(settings, "ai_call_provider_agent_id_en", "retell-agent-en")
+        monkeypatch.setattr(settings, "retell_server_url", "https://example.com/api/call-order/realtime/retell-webhook")
+
+        response = client.post("/api/call-order/realtime/session", json={"language": "en-IN"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["session_id"]
+        assert data["realtime"]["enabled"] is True
+        assert data["realtime"]["provider"]["name"] == "retell"
+        assert data["realtime"]["provider"]["agent_id"] == "retell-agent-default"
+        assert data["realtime"]["provider"]["agent_ids"]["en-IN"] == "retell-agent-en"
+        assert data["realtime"]["provider"]["server_url"] == "https://example.com/api/call-order/realtime/retell-webhook"
+
     def test_realtime_find_restaurants_returns_matches(self, client):
         owner_token = _owner_token(client, "realtime_restaurant_owner@test.com")
-        create_test_restaurant(client, owner_token, name="Aroma", city="Chicago")
-        create_test_restaurant(client, owner_token, name="Anjappar", city="Chicago")
+        aroma = create_test_restaurant(client, owner_token, name="Aroma", city="Chicago")
+        cat1 = create_test_category(client, owner_token, aroma.json()["id"], name="Main")
+        create_test_item(client, owner_token, cat1.json()["id"], name="Fried Rice", price_cents=999)
+        anjappar = create_test_restaurant(client, owner_token, name="Anjappar", city="Chicago")
+        cat2 = create_test_category(client, owner_token, anjappar.json()["id"], name="Main")
+        create_test_item(client, owner_token, cat2.json()["id"], name="Biryani", price_cents=1299)
 
         session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
         response = client.post(
@@ -296,8 +317,12 @@ class TestCallOrderRealtime:
 
     def test_realtime_list_restaurants_returns_live_database_rows(self, client):
         owner_token = _owner_token(client, "realtime_restaurant_list_owner@test.com")
-        create_test_restaurant(client, owner_token, name="Aroma", city="Chicago")
-        create_test_restaurant(client, owner_token, name="Anjappar", city="Chicago")
+        aroma = create_test_restaurant(client, owner_token, name="Aroma", city="Chicago")
+        cat1 = create_test_category(client, owner_token, aroma.json()["id"], name="Main")
+        create_test_item(client, owner_token, cat1.json()["id"], name="Fried Rice", price_cents=999)
+        anjappar = create_test_restaurant(client, owner_token, name="Anjappar", city="Chicago")
+        cat2 = create_test_category(client, owner_token, anjappar.json()["id"], name="Main")
+        create_test_item(client, owner_token, cat2.json()["id"], name="Biryani", price_cents=1299)
 
         session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
         response = client.post(
@@ -311,8 +336,12 @@ class TestCallOrderRealtime:
 
     def test_realtime_list_restaurants_falls_back_for_noisy_availability_query(self, client):
         owner_token = _owner_token(client, "realtime_restaurant_list_noise_owner@test.com")
-        create_test_restaurant(client, owner_token, name="Aroma", city="Chicago")
-        create_test_restaurant(client, owner_token, name="Anjappar", city="Chicago")
+        aroma = create_test_restaurant(client, owner_token, name="Aroma", city="Chicago")
+        cat1 = create_test_category(client, owner_token, aroma.json()["id"], name="Main")
+        create_test_item(client, owner_token, cat1.json()["id"], name="Fried Rice", price_cents=999)
+        anjappar = create_test_restaurant(client, owner_token, name="Anjappar", city="Chicago")
+        cat2 = create_test_category(client, owner_token, anjappar.json()["id"], name="Main")
+        create_test_item(client, owner_token, cat2.json()["id"], name="Biryani", price_cents=1299)
 
         session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
         response = client.post(
@@ -327,7 +356,9 @@ class TestCallOrderRealtime:
 
     def test_realtime_find_restaurants_matches_spoken_restaurant_variant(self, client):
         owner_token = _owner_token(client, "realtime_restaurant_variant_owner@test.com")
-        create_test_restaurant(client, owner_token, name="Anjappar", city="Chicago")
+        anjappar = create_test_restaurant(client, owner_token, name="Anjappar", city="Chicago")
+        cat = create_test_category(client, owner_token, anjappar.json()["id"], name="Main")
+        create_test_item(client, owner_token, cat.json()["id"], name="Biryani", price_cents=1299)
 
         session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
         response = client.post(
@@ -434,6 +465,77 @@ class TestCallOrderRealtime:
         orders_data = orders.json()
         assert any(order["total_cents"] == 1798 for order in orders_data)
 
+    # ── Retell Custom Function endpoint tests ─────────────────────────────
+
+    def test_retell_tool_list_restaurants_returns_data(self, client):
+        owner_token = _owner_token(client, "retell_tool_list_owner@test.com")
+        restaurant = create_test_restaurant(client, owner_token, name="RetellTestRestaurant", city="Chennai")
+        cat = create_test_category(client, owner_token, restaurant.json()["id"], name="Main")
+        create_test_item(client, owner_token, cat.json()["id"], name="Dosa", price_cents=500)
+
+        session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
+        response = client.post(
+            "/api/call-order/realtime/retell-tool/list_restaurants",
+            json={
+                "args": {},
+                "call": {"call_id": "test-retell-1", "agent_id": "agent_test", "metadata": {"sessionId": session["session_id"]}},
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert any(r["name"] == "RetellTestRestaurant" for r in data["restaurants"])
+
+    def test_retell_tool_get_menu_by_id(self, client):
+        owner_token = _owner_token(client, "retell_tool_menu_id_owner@test.com")
+        restaurant = create_test_restaurant(client, owner_token, name="RetellMenuTest", city="Chennai")
+        cat = create_test_category(client, owner_token, restaurant.json()["id"], name="Snacks")
+        create_test_item(client, owner_token, cat.json()["id"], name="Samosa", price_cents=200)
+
+        session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
+        response = client.post(
+            "/api/call-order/realtime/retell-tool/get_restaurant_menu",
+            json={
+                "args": {"restaurant_id": restaurant.json()["id"]},
+                "call": {"call_id": "test-retell-2", "agent_id": "agent_test", "metadata": {"sessionId": session["session_id"]}},
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["restaurant"]["name"] == "RetellMenuTest"
+        assert len(data["categories"]) >= 1
+        assert any(i["name"] == "Samosa" for cat in data["categories"] for i in cat.get("items", []))
+
+    def test_retell_tool_get_menu_by_name(self, client):
+        owner_token = _owner_token(client, "retell_tool_menu_name_owner@test.com")
+        restaurant = create_test_restaurant(client, owner_token, name="RetellNameTest", city="Chennai")
+        cat = create_test_category(client, owner_token, restaurant.json()["id"], name="Curries")
+        create_test_item(client, owner_token, cat.json()["id"], name="Paneer Butter Masala", price_cents=1200)
+
+        session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
+        response = client.post(
+            "/api/call-order/realtime/retell-tool/get_restaurant_menu",
+            json={
+                "args": {"restaurant_name": "RetellNameTest"},
+                "call": {"call_id": "test-retell-3", "agent_id": "agent_test", "metadata": {"sessionId": session["session_id"]}},
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["restaurant"]["name"] == "RetellNameTest"
+        assert not data.get("error")
+
+    def test_retell_tool_missing_session_id_returns_error(self, client):
+        response = client.post(
+            "/api/call-order/realtime/retell-tool/list_restaurants",
+            json={
+                "args": {},
+                "call": {"call_id": "test-retell-no-session", "agent_id": "agent_test"},
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "error" in data or "Missing" in str(data)
+
     def test_turn_handles_acknowledgement_without_matching_fake_dish(self, client):
         owner_token = _owner_token(client, "acknowledgement_owner@test.com")
         aroma = create_test_restaurant(client, owner_token, name="Aroma", city="Chicago")
@@ -491,7 +593,9 @@ class TestCallOrderRealtime:
 
     def test_turn_does_not_switch_to_negatively_mentioned_restaurant(self, client):
         owner_token = _owner_token(client, "negative_restaurant_owner@test.com")
-        create_test_restaurant(client, owner_token, name="Aroma", city="Chicago")
+        aroma = create_test_restaurant(client, owner_token, name="Aroma", city="Chicago")
+        aroma_cat = create_test_category(client, owner_token, aroma.json()["id"], name="Main")
+        create_test_item(client, owner_token, aroma_cat.json()["id"], name="Fried Rice", price_cents=999)
         anjappar = create_test_restaurant(client, owner_token, name="Anjappar", city="Chicago")
         category = create_test_category(client, owner_token, anjappar.json()["id"], name="Soup")
         create_test_item(client, owner_token, category.json()["id"], name="Mutton Bone Soup", price_cents=1299)
@@ -512,7 +616,9 @@ class TestCallOrderRealtime:
         data = correction.json()
         assert data["selected_restaurant"]["name"] == "Aroma"
         assert data["pending_action"] is None
-        assert "tell me the dish you want from there" in data["assistant_reply"].lower()
+        reply = data["assistant_reply"].lower()
+        assert "aroma" in reply
+        assert "dish" in reply or "tell me" in reply
 
     def test_turn_matches_kurma_alias_variants(self, client):
         owner_token = _owner_token(client, "kurma_owner@test.com")

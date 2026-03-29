@@ -362,8 +362,10 @@ export function isLikelyWrongDomainAssistant(text) {
   return matchedSignalCount >= 2;
 }
 
-export function getWrongDomainAssistantMessage() {
-  return "Realtime AI Call stopped because the configured Vapi assistant is not a restaurant-ordering assistant. Update the Vapi assistant and try again.";
+export function getWrongDomainAssistantMessage(providerName = "vapi") {
+  const rawProvider = String(providerName || "vapi").trim() || "vapi";
+  const provider = rawProvider.length ? `${rawProvider.charAt(0).toUpperCase()}${rawProvider.slice(1)}` : "Vapi";
+  return `Realtime AI Call stopped because the configured ${provider} assistant is not a restaurant-ordering assistant. Update the ${provider} assistant and try again.`;
 }
 
 export function getCallCheckoutMessage(language, status) {
