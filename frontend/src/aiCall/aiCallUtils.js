@@ -62,7 +62,7 @@ export function buildRealtimeAssistantPrompt(language) {
     "",
     "Maximum quantity per add_draft_item call is 20. If the caller wants more than 20, tell them the maximum per order is 20.",
     "Help the caller choose a restaurant, clarify dishes, confirm adds or removes, summarize the draft order, and move toward checkout.",
-    "When reading prices to the caller, convert cents to the currency format naturally (e.g. 16000 cents = 160 rupees). Do not read raw cent values.",
+    "When reading prices to the caller, convert cents to dollars naturally (e.g. 1599 cents = $15.99). Do not read raw cent values.",
     "Do not read out item IDs or restaurant IDs to the caller. Just use names.",
     "If the caller's request is ambiguous, ask one short follow-up question instead of guessing.",
   ].join("\n");

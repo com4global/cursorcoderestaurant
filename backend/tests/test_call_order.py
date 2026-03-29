@@ -1196,3 +1196,246 @@ class TestCallOrderFinalize:
         cart_data = cart.json()
         assert len(cart_data["restaurants"]) == 2
         assert sorted(group["restaurant_name"] for group in cart_data["restaurants"]) == ["Anjappar", "Chettinad House"]
+
+
+class TestMultiRestaurantOrdering:
+    """Test multi-restaurant ordering via Retell tool endpoints.
+
+    Simulates realistic voice-call flows where a user browses multiple
+    restaurants and adds items from different menus into one draft order.
+    """
+
+    # ── helpers ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _setup_restaurants(client):
+        """Create 3 restaurants with distinct menus and return their metadata."""
+        owner_token = _owner_token(client, "multi_rest_owner@test.com")
+
+        # Restaurant 1: Anjappar (South Indian)
+        anjappar = create_test_restaurant(client, owner_token, name="Anjappar", city="Chennai").json()
+        anjappar_soups = create_test_category(client, owner_token, anjappar["id"], name="Soups").json()
+        anjappar_starters = create_test_category(client, owner_token, anjappar["id"], name="Starters").json()
+        mutton_soup = create_test_item(client, owner_token, anjappar_soups["id"], name="Mutton Bone Soup", price_cents=599).json()
+        chicken_65 = create_test_item(client, owner_token, anjappar_starters["id"], name="Chicken 65", price_cents=899).json()
+
+        # Restaurant 2: Dominos (Pizza)
+        dominos = create_test_restaurant(client, owner_token, name="Dominos", city="Chennai").json()
+        dominos_pizza = create_test_category(client, owner_token, dominos["id"], name="Pizza").json()
+        dominos_sides = create_test_category(client, owner_token, dominos["id"], name="Sides").json()
+        margherita = create_test_item(client, owner_token, dominos_pizza["id"], name="Margherita Pizza", price_cents=1499).json()
+        garlic_bread = create_test_item(client, owner_token, dominos_sides["id"], name="Garlic Bread", price_cents=499).json()
+
+        # Restaurant 3: Aroma (North Indian)
+        aroma = create_test_restaurant(client, owner_token, name="Aroma", city="Chennai").json()
+        aroma_curries = create_test_category(client, owner_token, aroma["id"], name="Curries").json()
+        paneer = create_test_item(client, owner_token, aroma_curries["id"], name="Paneer Butter Masala", price_cents=1299).json()
+        dal = create_test_item(client, owner_token, aroma_curries["id"], name="Dal Tadka", price_cents=699).json()
+
+        return {
+            "anjappar": {"restaurant": anjappar, "items": {"mutton_soup": mutton_soup, "chicken_65": chicken_65}},
+            "dominos": {"restaurant": dominos, "items": {"margherita": margherita, "garlic_bread": garlic_bread}},
+            "aroma": {"restaurant": aroma, "items": {"paneer": paneer, "dal": dal}},
+        }
+
+    @staticmethod
+    def _retell_call(client, tool_name, args, session_id):
+        """Simulate a Retell Custom Function call."""
+        return client.post(
+            f"/api/call-order/realtime/retell-tool/{tool_name}",
+            json={
+                "args": args,
+                "call": {"call_id": "multi-test", "agent_id": "agent_test", "metadata": {"sessionId": session_id}},
+            },
+        )
+
+    # ── tests ──────────────────────────────────────────────────────────
+
+    def test_add_items_from_two_restaurants(self, client):
+        """User adds Mutton Soup from Anjappar and Margherita from Dominos."""
+        data = self._setup_restaurants(client)
+        session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
+        sid = session["session_id"]
+
+        # Add Mutton Bone Soup from Anjappar
+        r1 = self._retell_call(client, "add_draft_item", {"item_id": data["anjappar"]["items"]["mutton_soup"]["id"], "quantity": 1}, sid)
+        assert r1.status_code == 200
+        assert r1.json()["added"] == "Mutton Bone Soup"
+
+        # Add Margherita from Dominos
+        r2 = self._retell_call(client, "add_draft_item", {"item_id": data["dominos"]["items"]["margherita"]["id"], "quantity": 1}, sid)
+        assert r2.status_code == 200
+        assert r2.json()["added"] == "Margherita Pizza"
+        assert "Mutton Bone Soup" in r2.json()["summary"]
+        assert "Margherita Pizza" in r2.json()["summary"]
+
+    def test_add_items_from_three_restaurants(self, client):
+        """User orders from all three restaurants in one session."""
+        data = self._setup_restaurants(client)
+        session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
+        sid = session["session_id"]
+
+        self._retell_call(client, "add_draft_item", {"item_id": data["anjappar"]["items"]["chicken_65"]["id"], "quantity": 2}, sid)
+        self._retell_call(client, "add_draft_item", {"item_id": data["dominos"]["items"]["garlic_bread"]["id"], "quantity": 3}, sid)
+        r3 = self._retell_call(client, "add_draft_item", {"item_id": data["aroma"]["items"]["paneer"]["id"], "quantity": 1}, sid)
+        assert r3.status_code == 200
+
+        # Verify draft summary includes items from all 3 restaurants
+        summary = self._retell_call(client, "get_draft_summary", {}, sid)
+        assert summary.status_code == 200
+        summary_text = summary.json()["summary"]
+        assert "Chicken 65" in summary_text
+        assert "Garlic Bread" in summary_text
+        assert "Paneer Butter Masala" in summary_text
+
+    def test_add_same_item_increments_quantity(self, client):
+        """Adding the same item twice should increment quantity, not duplicate."""
+        data = self._setup_restaurants(client)
+        session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
+        sid = session["session_id"]
+
+        self._retell_call(client, "add_draft_item", {"item_id": data["dominos"]["items"]["margherita"]["id"], "quantity": 1}, sid)
+        self._retell_call(client, "add_draft_item", {"item_id": data["dominos"]["items"]["margherita"]["id"], "quantity": 2}, sid)
+
+        summary = self._retell_call(client, "get_draft_summary", {}, sid)
+        assert summary.status_code == 200
+        assert "3 Margherita Pizza" in summary.json()["summary"]
+
+    def test_remove_item_from_multi_restaurant_cart(self, client):
+        """Add items from 2 restaurants, remove one, verify the other remains."""
+        data = self._setup_restaurants(client)
+        session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
+        sid = session["session_id"]
+
+        self._retell_call(client, "add_draft_item", {"item_id": data["anjappar"]["items"]["mutton_soup"]["id"], "quantity": 2}, sid)
+        self._retell_call(client, "add_draft_item", {"item_id": data["aroma"]["items"]["dal"]["id"], "quantity": 1}, sid)
+
+        # Remove Mutton Bone Soup entirely
+        remove = self._retell_call(client, "remove_draft_item", {"item_id": data["anjappar"]["items"]["mutton_soup"]["id"], "quantity": 2}, sid)
+        assert remove.status_code == 200
+        assert remove.json()["removed"] == "Mutton Bone Soup"
+
+        summary = self._retell_call(client, "get_draft_summary", {}, sid)
+        summary_text = summary.json()["summary"]
+        assert "Dal Tadka" in summary_text
+        assert "Mutton Bone Soup" not in summary_text
+
+    def test_remove_partial_quantity(self, client):
+        """Remove 1 of 3 items — quantity should become 2."""
+        data = self._setup_restaurants(client)
+        session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
+        sid = session["session_id"]
+
+        self._retell_call(client, "add_draft_item", {"item_id": data["dominos"]["items"]["garlic_bread"]["id"], "quantity": 3}, sid)
+        remove = self._retell_call(client, "remove_draft_item", {"item_id": data["dominos"]["items"]["garlic_bread"]["id"], "quantity": 1}, sid)
+        assert remove.status_code == 200
+        assert "2 Garlic Bread" in remove.json()["summary"]
+
+    def test_remove_item_not_in_cart_succeeds_silently(self, client):
+        """Removing an item not in the cart succeeds without error (no-op behavior)."""
+        data = self._setup_restaurants(client)
+        session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
+        sid = session["session_id"]
+
+        self._retell_call(client, "add_draft_item", {"item_id": data["anjappar"]["items"]["chicken_65"]["id"], "quantity": 1}, sid)
+        remove = self._retell_call(client, "remove_draft_item", {"item_id": data["aroma"]["items"]["paneer"]["id"], "quantity": 1}, sid)
+        assert remove.status_code == 200
+
+    def test_full_flow_browse_and_order_from_multiple_restaurants(self, client):
+        """End-to-end: list restaurants → get menus → add items → verify cart."""
+        data = self._setup_restaurants(client)
+        session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
+        sid = session["session_id"]
+
+        # Step 1: "What restaurants do you have?"
+        list_resp = self._retell_call(client, "list_restaurants", {}, sid)
+        assert list_resp.status_code == 200
+        names = [r["name"] for r in list_resp.json()["restaurants"]]
+        assert "Anjappar" in names
+        assert "Dominos" in names
+        assert "Aroma" in names
+
+        # Step 2: "Show me Anjappar's menu"
+        anjappar_menu = self._retell_call(client, "get_restaurant_menu", {"restaurant_name": "Anjappar"}, sid)
+        assert anjappar_menu.status_code == 200
+        anjappar_items = [i["name"] for cat in anjappar_menu.json()["categories"] for i in cat.get("items", [])]
+        assert "Mutton Bone Soup" in anjappar_items
+
+        # Step 3: "Add 2 Mutton Bone Soup"
+        add1 = self._retell_call(client, "add_draft_item", {"item_id": data["anjappar"]["items"]["mutton_soup"]["id"], "quantity": 2}, sid)
+        assert add1.json()["added"] == "Mutton Bone Soup"
+        assert add1.json()["quantity"] == 2
+
+        # Step 4: "Now show me Dominos menu"
+        dominos_menu = self._retell_call(client, "get_restaurant_menu", {"restaurant_id": data["dominos"]["restaurant"]["id"]}, sid)
+        assert dominos_menu.status_code == 200
+
+        # Step 5: "Add a Margherita Pizza and 2 Garlic Breads"
+        self._retell_call(client, "add_draft_item", {"item_id": data["dominos"]["items"]["margherita"]["id"], "quantity": 1}, sid)
+        self._retell_call(client, "add_draft_item", {"item_id": data["dominos"]["items"]["garlic_bread"]["id"], "quantity": 2}, sid)
+
+        # Step 6: "Also add Dal Tadka from Aroma"
+        self._retell_call(client, "add_draft_item", {"item_id": data["aroma"]["items"]["dal"]["id"], "quantity": 1}, sid)
+
+        # Step 7: Verify final cart state
+        summary = self._retell_call(client, "get_draft_summary", {}, sid)
+        assert summary.status_code == 200
+        summary_text = summary.json()["summary"]
+        assert "Mutton Bone Soup" in summary_text
+        assert "Margherita Pizza" in summary_text
+        assert "Dal Tadka" in summary_text
+
+    def test_add_item_with_invalid_id_returns_error(self, client):
+        """Adding a non-existent item ID should fail gracefully."""
+        session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
+        sid = session["session_id"]
+
+        resp = self._retell_call(client, "add_draft_item", {"item_id": 999999, "quantity": 1}, sid)
+        assert resp.status_code == 200
+        assert resp.json().get("status") == "FAILED" or "error" in resp.json()
+
+    def test_cart_total_is_correct_across_restaurants(self, client):
+        """Verify the draft total matches the sum of item prices * quantities."""
+        data = self._setup_restaurants(client)
+        session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
+        sid = session["session_id"]
+
+        # Mutton Soup 599 x2 = 1198, Margherita 1499 x1 = 1499, Dal 699 x1 = 699
+        # Expected total: 3396 cents
+        self._retell_call(client, "add_draft_item", {"item_id": data["anjappar"]["items"]["mutton_soup"]["id"], "quantity": 2}, sid)
+        self._retell_call(client, "add_draft_item", {"item_id": data["dominos"]["items"]["margherita"]["id"], "quantity": 1}, sid)
+        self._retell_call(client, "add_draft_item", {"item_id": data["aroma"]["items"]["dal"]["id"], "quantity": 1}, sid)
+
+        draft = client.get(f"/api/call-order/realtime/tools/draft-summary/{sid}")
+        assert draft.status_code == 200
+        assert draft.json()["draft"]["draft_total_cents"] == 3396
+
+    def test_checkout_multi_restaurant_creates_separate_orders(self, client):
+        """Items from different restaurants should create separate orders on checkout."""
+        data = self._setup_restaurants(client)
+        customer = register_user(client, email="multi_checkout_customer@test.com", password="password123")
+        token = customer.json()["access_token"]
+
+        session = client.post("/api/call-order/realtime/session", json={"language": "en-IN"}).json()
+        sid = session["session_id"]
+
+        # Add from 2 restaurants
+        self._retell_call(client, "add_draft_item", {"item_id": data["anjappar"]["items"]["chicken_65"]["id"], "quantity": 1}, sid)
+        self._retell_call(client, "add_draft_item", {"item_id": data["dominos"]["items"]["margherita"]["id"], "quantity": 1}, sid)
+
+        # Checkout
+        checkout = client.post(
+            "/api/call-order/realtime/tools/start-checkout",
+            json={"session_id": sid},
+            headers=get_auth_header(token),
+        )
+        assert checkout.status_code == 200
+        assert checkout.json()["materialized_restaurant_count"] == 2
+        assert checkout.json()["draft"]["draft_total_items"] == 0
+
+        # Verify orders exist
+        orders = client.get("/my-orders", headers=get_auth_header(token))
+        assert orders.status_code == 200
+        order_totals = sorted(o["total_cents"] for o in orders.json())
+        assert 899 in order_totals   # Chicken 65
+        assert 1499 in order_totals  # Margherita Pizza

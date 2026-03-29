@@ -1673,7 +1673,7 @@ export default function AICallPage({
                           <div className="ai-call-cart-item-info">
                             <div className="ai-call-cart-item-name">{item.name}</div>
                           </div>
-                          <div className="ai-call-cart-item-price">&#8377;{((item.price_cents * item.quantity) / 100).toFixed(0)}</div>
+                          <div className="ai-call-cart-item-price">${((item.price_cents * item.quantity) / 100).toFixed(2)}</div>
                         </div>
                       ))}
                     </div>
@@ -1683,7 +1683,7 @@ export default function AICallPage({
 
               <div className="ai-call-cart-total">
                 <span>Total</span>
-                <strong>&#8377;{(draftTotalCents / 100).toFixed(0)}</strong>
+                <strong>${(draftTotalCents / 100).toFixed(2)}</strong>
               </div>
             </>
           )}
