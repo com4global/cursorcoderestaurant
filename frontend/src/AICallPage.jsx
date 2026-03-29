@@ -116,7 +116,14 @@ export default function AICallPage({
   radiusMiles = null,
 }) {
   const [language, setLanguage] = useState("en-IN");
-  const [callState, setCallState] = useState(AI_CALL_STATES.IDLE);
+  const [callState, _setCallState] = useState(AI_CALL_STATES.IDLE);
+  const setCallState = (valueOrFn) => {
+    _setCallState((prev) => {
+      const next = typeof valueOrFn === "function" ? valueOrFn(prev) : valueOrFn;
+      callStateRef.current = next;
+      return next;
+    });
+  };
   const [isConnected, setIsConnected] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Start a separate AI call to ask questions and place an order by voice.");
   const [messages, setMessages] = useState([]);
@@ -685,6 +692,8 @@ export default function AICallPage({
     if (handsFreeEnabledRef.current && connectedRef.current) {
       setCallState(AI_CALL_STATES.LISTENING);
       setStatusMessage(messageWhenListening);
+      // Ensure VAD monitor is alive (it may have stopped due to transient condition)
+      startVoiceMonitor();
       if (!mediaRecorderRef.current && !turnInFlightRef.current && !finalizingRef.current) {
         void beginListening("handsfree-ready");
       }
@@ -876,9 +885,7 @@ export default function AICallPage({
     sessionIdRef.current = sessionId;
   }, [sessionId]);
 
-  useEffect(() => {
-    callStateRef.current = callState;
-  }, [callState]);
+  // callStateRef is now updated synchronously inside setCallState wrapper
 
   useEffect(() => {
     finalizingRef.current = isFinalizing;
