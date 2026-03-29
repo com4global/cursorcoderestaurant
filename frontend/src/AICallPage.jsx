@@ -168,6 +168,8 @@ export default function AICallPage({
   const knownItemIdsRef = useRef(new Map()); // item_id -> { name, restaurant_id, price_cents }
   // Serial queue ensures tool calls execute one at a time across all messages
   const toolQueueRef = useRef(Promise.resolve());
+  // Polling interval for syncing draft cart during Retell server-side tool calls
+  const draftPollRef = useRef(null);
 
   const VAD_THRESHOLD = 0.075;
   const VAD_SILENCE_MS = 900;
@@ -885,6 +887,8 @@ export default function AICallPage({
   useEffect(() => {
     return () => {
       clearMonitorLoop();
+      clearInterval(draftPollRef.current);
+      draftPollRef.current = null;
       stopAssistantPlayback("unmount");
       void cleanupRealtimeRuntime();
       try {
@@ -1121,6 +1125,19 @@ export default function AICallPage({
     setIsHandsFreeEnabled(true);
     applyConnectedSession(session, { statusText: "Connecting your AI call...", connectedState: AI_CALL_STATES.READY });
 
+    // Retell tools execute server-side; poll the session to sync the draft cart UI.
+    if (providerName === "retell") {
+      clearInterval(draftPollRef.current);
+      const pollSessionId = session?.session_id;
+      draftPollRef.current = setInterval(async () => {
+        if (!connectedRef.current || !pollSessionId) return;
+        try {
+          const snap = await aiCallRealtimeGetDraftSummary(pollSessionId);
+          if (snap?.draft) applyDraftSnapshot(snap);
+        } catch { /* ignore transient errors */ }
+      }, 2000);
+    }
+
     try {
       await runtime.start();
       logAICall("realtime:started", {
@@ -1222,6 +1239,8 @@ export default function AICallPage({
     });
 
     realtimeDisconnectingRef.current = true;
+    clearInterval(draftPollRef.current);
+    draftPollRef.current = null;
     clearMonitorLoop();
     try {
       ignoreNextStopRef.current = true;
