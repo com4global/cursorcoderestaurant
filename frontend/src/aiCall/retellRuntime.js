@@ -60,7 +60,13 @@ export function createRetellCallRuntime({
   const retell = new RetellWebClient();
 
   const listeners = [
-    ["call_started", () => onCallStart?.()],
+    ["call_started", () => {
+      // Browser autoplay policies require startAudioPlayback after connection
+      if (typeof retell.startAudioPlayback === "function") {
+        retell.startAudioPlayback().catch(() => {});
+      }
+      onCallStart?.();
+    }],
     ["call_ended", () => onCallEnd?.()],
     ["agent_start_talking", () => onSpeechStart?.()],
     ["agent_stop_talking", () => onSpeechEnd?.()],
@@ -80,19 +86,11 @@ export function createRetellCallRuntime({
   return {
     async start() {
       if (typeof retell.startCall === "function") {
-        await retell.startCall({
-          agentId,
-          accessToken,
-          metadata,
-        });
+        await retell.startCall({ accessToken });
         return;
       }
       if (typeof retell.start === "function") {
-        await retell.start({
-          agentId,
-          accessToken,
-          metadata,
-        });
+        await retell.start({ accessToken });
         return;
       }
       throw new Error("Retell runtime does not expose a supported start method.");
@@ -107,8 +105,10 @@ export function createRetellCallRuntime({
       }
     },
     setMuted(muted) {
-      if (typeof retell.setMuted === "function") {
-        retell.setMuted(Boolean(muted));
+      if (muted && typeof retell.mute === "function") {
+        retell.mute();
+      } else if (!muted && typeof retell.unmute === "function") {
+        retell.unmute();
       }
     },
     isMuted() {
