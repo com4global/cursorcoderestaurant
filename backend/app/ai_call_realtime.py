@@ -17,13 +17,9 @@ from .call_order import (
     _assistant_greeting,
     _finalize_draft_cart,
     _get_session_record,
-    _item_candidates,
-    _normalize_spoken_text,
-    _restaurant_request_phrase,
     _normalize_language,
     _persist_session,
     _remove_from_draft_cart,
-    _restaurant_candidates,
     _session_from_record,
     _session_snapshot,
     _summarize_cart,
@@ -272,69 +268,6 @@ def _get_menu_item_context(db: Session, item_id: int) -> tuple[models.MenuItem, 
     return item, restaurant, category
 
 
-def _resolve_item_with_fallback(
-    db: Session,
-    item_id: int,
-    item_name: str | None = None,
-    restaurant_id: int | None = None,
-) -> tuple[models.MenuItem, models.Restaurant, models.MenuCategory]:
-    """Look up a menu item by ID, but auto-correct using name-based search if the
-    resolved item doesn't match the expected name or restaurant.  This handles
-    the common case where the LLM hallucinates or confuses item IDs."""
-    import logging
-    logger = logging.getLogger(__name__)
-
-    # Try the direct ID lookup first
-    try:
-        item, restaurant, category = _get_menu_item_context(db, item_id)
-    except HTTPException:
-        item, restaurant, category = None, None, None
-
-    # Check if the resolved item matches expectations
-    needs_correction = False
-    if item is None:
-        needs_correction = True
-    elif restaurant_id is not None and category.restaurant_id != restaurant_id:
-        logger.warning(
-            "Item ID %d belongs to restaurant %d (%s) but caller expected restaurant %d – attempting name-based correction",
-            item_id, category.restaurant_id, restaurant.name, restaurant_id,
-        )
-        needs_correction = True
-    elif item_name and item_name.strip():
-        # Fuzzy check: if the resolved item name is clearly different from what was asked
-        resolved_lower = item.name.lower().strip()
-        expected_lower = item_name.lower().strip()
-        if resolved_lower != expected_lower and expected_lower not in resolved_lower and resolved_lower not in expected_lower:
-            logger.warning(
-                "Item ID %d resolved to '%s' but caller expected '%s' – attempting name-based correction",
-                item_id, item.name, item_name,
-            )
-            needs_correction = True
-
-    if needs_correction and item_name and item_name.strip():
-        # Use the existing fuzzy search to find the right item
-        candidates = _item_candidates(db, item_name, restaurant_id)
-        if not candidates and restaurant_id is not None:
-            # If the LLM hallucinated the restaurant_id too, search globally!
-            candidates = _item_candidates(db, item_name, None)
-            
-        if candidates:
-            best = candidates[0]
-            logger.info(
-                "Name-based correction: '%s' → item %d '%s' (score %.2f) in restaurant %d",
-                item_name, best["id"], best["name"], best["score"], best["restaurant_id"],
-            )
-            return _get_menu_item_context(db, best["id"])
-
-    if item is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Menu item not found for id={item_id}" + (f" name='{item_name}'" if item_name else ""),
-        )
-
-    return item, restaurant, category
-
-
 @router.post("/session")
 def bootstrap_ai_call_realtime_session(payload: RealtimeSessionBootstrapIn, db: Session = Depends(get_db)):
     language = _normalize_language(payload.language)
@@ -351,23 +284,27 @@ def bootstrap_ai_call_realtime_session(payload: RealtimeSessionBootstrapIn, db: 
 @router.post("/tools/find-restaurants")
 def realtime_find_restaurants(payload: RealtimeRestaurantToolIn, db: Session = Depends(get_db)):
     session = _get_or_create_call_session(db, payload.session_id, "en-IN")
-    matches = _restaurant_candidates(db, payload.query)
-    # Filter: only restaurants with menus and within radius
+    query = payload.query.strip().lower()
+    restaurants = crud.list_restaurants(db)
     filtered = []
-    for m in matches:
-        r = db.query(models.Restaurant).filter(models.Restaurant.id == m["id"]).first()
-        if not r or not _has_menu(db, r.id):
+    for r in restaurants:
+        if not _has_menu(db, r.id):
+            continue
+        if query not in r.name.lower():
             continue
         if payload.lat is not None and payload.lng is not None and payload.radius_miles is not None:
             if r.latitude and r.longitude and not (r.latitude == 0.0 and r.longitude == 0.0):
                 dist = _haversine_miles(payload.lat, payload.lng, float(r.latitude), float(r.longitude))
                 if dist > payload.radius_miles:
                     continue
-        filtered.append(m)
+        filtered.append({"id": r.id, "name": r.name})
+    if not filtered:
+        # No match — return all restaurants with menus
+        filtered = [{"id": r.id, "name": r.name} for r in restaurants if _has_menu(db, r.id)]
     return {
         "session_id": session["id"],
         "query": payload.query,
-        "restaurants": filtered,
+        "restaurants": filtered[:5],
     }
 
 
@@ -375,22 +312,18 @@ def realtime_find_restaurants(payload: RealtimeRestaurantToolIn, db: Session = D
 def realtime_list_restaurants(payload: RealtimeRestaurantBrowseToolIn, db: Session = Depends(get_db)):
     session = _get_or_create_call_session(db, payload.session_id, "en-IN")
     restaurants = crud.list_restaurants(db)
-    # Filter by location radius and must have menu
     restaurants = _filter_by_location_and_menu(db, restaurants, payload.lat, payload.lng, payload.radius_miles)
-    normalized_query = _restaurant_request_phrase(payload.query or "")
-    if not normalized_query:
-        normalized_query = _normalize_spoken_text(payload.query or "")
+    query = (payload.query or "").strip().lower()
     filtered = [
         restaurant for restaurant in restaurants
-        if not normalized_query or normalized_query in restaurant.name.lower() or normalized_query in (restaurant.city or "").lower()
+        if not query or query in restaurant.name.lower() or query in (restaurant.city or "").lower()
     ]
-    if normalized_query and not filtered:
+    if query and not filtered:
         filtered = restaurants
     filtered.sort(key=lambda restaurant: restaurant.name.lower())
     return {
         "session_id": session["id"],
         "query": payload.query or "",
-        "normalized_query": normalized_query,
         "restaurants": [
             {
                 "id": restaurant.id,
@@ -410,23 +343,13 @@ def realtime_get_restaurant_menu(payload: RealtimeMenuToolIn, db: Session = Depe
     restaurant = None
     if payload.restaurant_id is not None:
         restaurant = db.query(models.Restaurant).filter(models.Restaurant.id == payload.restaurant_id).first()
-        
+
     if not restaurant and payload.restaurant_name:
-        # Fallback to name search
-        candidates = _restaurant_candidates(db, payload.restaurant_name)
-        if candidates:
-            best_candidate = candidates[0]
-            # Try to disambiguate if multiple restaurants have similar names by checking known valid IDs
-            if payload.known_restaurant_ids:
-                for c in candidates:
-                    if c["id"] in payload.known_restaurant_ids:
-                        best_candidate = c
-                        break
-                        
-            restaurant = db.query(models.Restaurant).filter(models.Restaurant.id == best_candidate["id"]).first()
-            if restaurant:
-                # Update payload to use the correct ID so downstream code works seamlessly if needed
-                payload.restaurant_id = restaurant.id
+        name_lower = payload.restaurant_name.strip().lower()
+        for r in crud.list_restaurants(db):
+            if name_lower in r.name.lower() or r.name.lower() in name_lower:
+                restaurant = r
+                break
 
     if not restaurant:
         raise HTTPException(status_code=404, detail="Restaurant not found")
@@ -440,15 +363,12 @@ def realtime_get_restaurant_menu(payload: RealtimeMenuToolIn, db: Session = Depe
                 "name": category.name,
                 "items": [
                     {"id": item.id, "name": item.name, "price_cents": item.price_cents}
-                    for item in items[:8]
+                    for item in items
                 ],
             }
         )
 
-    item_query = payload.query or restaurant.name
-    suggestions = _item_candidates(db, item_query, restaurant.id) if payload.query else []
-    
-    if not categories_payload and not suggestions:
+    if not categories_payload:
         return {
             "status": "FAILED",
             "error": "Menu empty",
@@ -461,7 +381,6 @@ def realtime_get_restaurant_menu(payload: RealtimeMenuToolIn, db: Session = Depe
         "session_id": session["id"],
         "restaurant": {"id": restaurant.id, "name": restaurant.name},
         "categories": categories_payload,
-        "suggested_items": suggestions,
     }
 
 
@@ -478,9 +397,7 @@ def realtime_draft_summary(session_id: str, db: Session = Depends(get_db)):
 @router.post("/tools/add-item")
 def realtime_add_item(payload: RealtimeDraftItemToolIn, db: Session = Depends(get_db)):
     session = _get_or_create_call_session(db, payload.session_id, "en-IN")
-    item, restaurant, category = _resolve_item_with_fallback(
-        db, payload.item_id, payload.item_name, payload.restaurant_id
-    )
+    item, restaurant, category = _get_menu_item_context(db, payload.item_id)
     candidate = _item_payload(item, restaurant, category)
     _add_to_draft_cart(session, candidate, payload.quantity)
     session["selected_restaurant"] = {"id": restaurant.id, "name": restaurant.name, "type": "restaurant", "score": 1.0}
@@ -498,9 +415,7 @@ def realtime_add_item(payload: RealtimeDraftItemToolIn, db: Session = Depends(ge
 @router.post("/tools/remove-item")
 def realtime_remove_item(payload: RealtimeDraftItemToolIn, db: Session = Depends(get_db)):
     session = _get_or_create_call_session(db, payload.session_id, "en-IN")
-    item, restaurant, category = _resolve_item_with_fallback(
-        db, payload.item_id, payload.item_name, payload.restaurant_id
-    )
+    item, restaurant, category = _get_menu_item_context(db, payload.item_id)
     candidate = _item_payload(item, restaurant, category)
     removed = _remove_from_draft_cart(session, candidate, payload.quantity)
     if not removed:
@@ -572,16 +487,15 @@ def _execute_realtime_tool(
     if name == "list_restaurants":
         session = _get_or_create_call_session(db, session_id, "en-IN")
         restaurants = crud.list_restaurants(db)
-        query = str(arguments.get("query") or "")
+        query = str(arguments.get("query") or "").strip().lower()
         limit = int(arguments.get("limit") or 8)
-        normalized_query = _restaurant_request_phrase(query) or _normalize_spoken_text(query)
         filtered = [
             r for r in restaurants
-            if not normalized_query
-            or normalized_query in r.name.lower()
-            or normalized_query in (r.city or "").lower()
+            if not query
+            or query in r.name.lower()
+            or query in (r.city or "").lower()
         ]
-        if normalized_query and not filtered:
+        if query and not filtered:
             filtered = restaurants
         filtered.sort(key=lambda r: r.name.lower())
         return {
@@ -594,21 +508,24 @@ def _execute_realtime_tool(
 
     if name == "find_restaurants":
         _get_or_create_call_session(db, session_id, "en-IN")
-        query = str(arguments.get("query") or "")
-        matches = _restaurant_candidates(db, query)
+        query = str(arguments.get("query") or "").strip().lower()
+        restaurants = crud.list_restaurants(db)
+        matches = [
+            {"id": r.id, "name": r.name}
+            for r in restaurants
+            if query in r.name.lower()
+        ]
+        if not matches:
+            matches = [{"id": r.id, "name": r.name} for r in restaurants]
         return {
             "query": query,
-            "restaurants": [
-                {"id": m["id"], "name": m["name"], "score": m.get("score")}
-                for m in matches[:5]
-            ],
+            "restaurants": matches[:5],
         }
 
     if name == "get_restaurant_menu":
         _get_or_create_call_session(db, session_id, "en-IN")
         restaurant_id = arguments.get("restaurant_id")
-        restaurant_name = str(arguments.get("restaurant_name") or "")
-        query = str(arguments.get("query") or "")
+        restaurant_name = str(arguments.get("restaurant_name") or "").strip()
         restaurant = None
         if restaurant_id is not None:
             try:
@@ -616,9 +533,12 @@ def _execute_realtime_tool(
             except (ValueError, TypeError):
                 pass
         if not restaurant and restaurant_name:
-            candidates = _restaurant_candidates(db, restaurant_name)
-            if candidates:
-                restaurant = db.query(models.Restaurant).filter(models.Restaurant.id == candidates[0]["id"]).first()
+            # Simple case-insensitive name match
+            name_lower = restaurant_name.lower()
+            for r in crud.list_restaurants(db):
+                if name_lower in r.name.lower() or r.name.lower() in name_lower:
+                    restaurant = r
+                    break
         if not restaurant:
             return {
                 "error": "Restaurant not found",
@@ -630,10 +550,9 @@ def _execute_realtime_tool(
             categories_payload.append({
                 "id": cat.id,
                 "name": cat.name,
-                "items": [{"id": i.id, "name": i.name, "price_cents": i.price_cents} for i in items[:5]],
+                "items": [{"id": i.id, "name": i.name, "price_cents": i.price_cents} for i in items],
             })
-        suggestions = _item_candidates(db, query or restaurant_name, restaurant.id) if (query or restaurant_name) else []
-        if not categories_payload and not suggestions:
+        if not categories_payload:
             return {
                 "status": "FAILED",
                 "error": f"Menu empty for {restaurant.name}",
@@ -641,8 +560,7 @@ def _execute_realtime_tool(
             }
         return {
             "restaurant": {"id": restaurant.id, "name": restaurant.name},
-            "categories": [c for c in categories_payload[:5]],
-            "suggested_items": suggestions[:5],
+            "categories": categories_payload,
         }
 
     if name == "get_draft_summary":
@@ -888,8 +806,26 @@ def create_retell_web_call(payload: dict, db: Session = Depends(get_db)):
     if session_id:
         metadata["session_id"] = session_id
 
+    # Build language-specific instruction injected via Retell dynamic variables.
+    # The Retell agent prompt must contain {{language_instruction}} placeholder.
+    if language == "ta-IN":
+        language_instruction = (
+            "Respond in Tanglish using ONLY English/Latin letters — the way Tamil "
+            "people casually speak mixing Tamil and English. Write Tamil words in "
+            "English letters (romanized), for example: 'Enna saapidanum?', "
+            "'Romba nalla irukku', 'Oru nimisham', 'Seri podlama?', 'Add panniduren'. "
+            "NEVER use Tamil script (Unicode). NEVER use Hindi or Telugu. "
+            "Use English for food names, restaurant names, prices, and action words. "
+            "Keep it short, friendly, and natural like a local conversation."
+        )
+    else:
+        language_instruction = "Respond in English suitable for Indian restaurant ordering calls."
+
     retell_payload = {
         "agent_id": agent_id,
+        "retell_llm_dynamic_variables": {
+            "language_instruction": language_instruction,
+        },
     }
     if metadata:
         retell_payload["metadata"] = metadata

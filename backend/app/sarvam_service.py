@@ -102,6 +102,44 @@ def transcribe_audio(audio_bytes: bytes, filename: str = "audio.webm", language_
         raise RuntimeError(f"Sarvam STT error: {str(e)}")
 
 
+def translate(
+    text: str,
+    source_language: str = "ta-IN",
+    target_language: str = "en-IN",
+) -> str:
+    """
+    Translate text between languages using Sarvam Mayura model.
+    Returns the translated text string.
+    """
+    payload = {
+        "input": text,
+        "source_language_code": source_language,
+        "target_language_code": target_language,
+        "model": "mayura:v1",
+        "enable_preprocessing": True,
+    }
+
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        f"{SARVAM_BASE}/translate",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "api-subscription-key": SARVAM_API_KEY,
+        },
+        method="POST",
+    )
+
+    try:
+        data = _read_json_response(req)
+        return data.get("translated_text", "")
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode() if e.fp else str(e)
+        raise RuntimeError(f"Sarvam translate error ({e.code}): {error_body}")
+    except Exception as e:
+        raise RuntimeError(f"Sarvam translate error: {str(e)}")
+
+
 def generate_speech(
     text: str,
     language: str = "en-IN",
@@ -150,6 +188,7 @@ def chat_completion(
     user_message: str,
     system_prompt: str = "",
     context: str = "",
+    temperature: float = 0.7,
 ) -> str:
     """
     Send a message to Sarvam chat completion API (sarvam-m model).
@@ -168,7 +207,7 @@ def chat_completion(
         "model": "sarvam-m",
         "messages": messages,
         "max_tokens": 200,
-        "temperature": 0.7,
+        "temperature": temperature,
     }
 
     body = json.dumps(payload).encode()
@@ -188,6 +227,9 @@ def chat_completion(
         if choices:
             content = choices[0].get("message", {}).get("content", "")
             import re
+            # Strip <think>...</think> blocks (model reasoning) entirely
+            content = re.sub(r"<think>[\s\S]*?</think>", "", content).strip()
+            # Also strip orphaned tags in case of malformed output
             content = re.sub(r"</?think>", "", content).strip()
             return content
         return ""

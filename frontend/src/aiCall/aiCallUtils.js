@@ -30,7 +30,7 @@ function pickRandomVoice(language) {
 export function buildRealtimeAssistantPrompt(language) {
   const preferredLanguage = normalizeCallLanguage(language);
   const languageInstruction = preferredLanguage === "ta-IN"
-    ? "Respond in Tamil unless the caller clearly switches languages."
+    ? "Respond in Tanglish — casual Tamil mixed with English, the way people naturally speak in Tamil Nadu. Use Tamil script for conversational words (வேணும், சொல்லுங்க, ஓகே, பண்ணட்டுமா) and English for food names, restaurant names, prices, and common words like order, add, cart, menu, checkout. Do NOT use formal or literary Tamil. Keep it friendly and natural like a local conversation."
     : "Respond in English suitable for Indian restaurant ordering calls.";
 
   return [

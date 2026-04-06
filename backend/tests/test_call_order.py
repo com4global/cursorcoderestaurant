@@ -297,6 +297,38 @@ class TestCallOrderRealtime:
         assert data["realtime"]["provider"]["agent_ids"]["en-IN"] == "retell-agent-en"
         assert data["realtime"]["provider"]["server_url"] == "https://example.com/api/call-order/realtime/retell-webhook"
 
+    def test_realtime_session_bootstrap_returns_retell_tamil_agent_id(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "ai_call_realtime_enabled", True)
+        monkeypatch.setattr(settings, "ai_call_provider", "retell")
+        monkeypatch.setattr(settings, "ai_call_provider_agent_id", "retell-agent-default")
+        monkeypatch.setattr(settings, "ai_call_provider_agent_id_en", "retell-agent-en")
+        monkeypatch.setattr(settings, "ai_call_provider_agent_id_ta", "retell-agent-ta")
+        monkeypatch.setattr(settings, "retell_server_url", "https://example.com/api/call-order/realtime/retell-webhook")
+
+        response = client.post("/api/call-order/realtime/session", json={"language": "ta-IN"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["session_id"]
+        assert data["realtime"]["enabled"] is True
+        assert data["realtime"]["provider"]["name"] == "retell"
+        assert data["realtime"]["provider"]["agent_ids"]["ta-IN"] == "retell-agent-ta"
+        assert data["realtime"]["provider"]["agent_ids"]["en-IN"] == "retell-agent-en"
+
+    def test_realtime_session_bootstrap_tamil_falls_back_to_default_agent(self, client, monkeypatch):
+        """When no Tamil-specific agent is set, ta-IN should fall back to the default agent_id."""
+        monkeypatch.setattr(settings, "ai_call_realtime_enabled", True)
+        monkeypatch.setattr(settings, "ai_call_provider", "retell")
+        monkeypatch.setattr(settings, "ai_call_provider_agent_id", "retell-agent-default")
+        monkeypatch.setattr(settings, "ai_call_provider_agent_id_en", "retell-agent-en")
+        monkeypatch.setattr(settings, "ai_call_provider_agent_id_ta", "")
+        monkeypatch.setattr(settings, "retell_server_url", "https://example.com/api/call-order/realtime/retell-webhook")
+
+        response = client.post("/api/call-order/realtime/session", json={"language": "ta-IN"})
+        assert response.status_code == 200
+        data = response.json()
+        # With no ta-specific agent, falls back to default
+        assert data["realtime"]["provider"]["agent_ids"]["ta-IN"] == "retell-agent-default"
+
     def test_realtime_find_restaurants_returns_matches(self, client):
         owner_token = _owner_token(client, "realtime_restaurant_owner@test.com")
         aroma = create_test_restaurant(client, owner_token, name="Aroma", city="Chicago")

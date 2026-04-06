@@ -10,6 +10,28 @@ function pickFirstString(values) {
 }
 
 export function parseRetellMessage(message) {
+  // Retell SDK emits "update" events with transcript as an array of
+  // { role: "agent"|"user", content: "..." } objects.  Extract the last
+  // entry so the UI always shows the most recent utterance.
+  if (Array.isArray(message?.transcript)) {
+    const last = message.transcript[message.transcript.length - 1];
+    if (last) {
+      const rawRole = String(last.role || "").toLowerCase();
+      let normalizedRole = "";
+      if (rawRole.includes("agent") || rawRole.includes("assistant") || rawRole.includes("bot")) {
+        normalizedRole = "assistant";
+      } else if (rawRole.includes("user") || rawRole.includes("customer") || rawRole.includes("human")) {
+        normalizedRole = "user";
+      }
+      return {
+        type: "transcript",
+        status: "",
+        role: normalizedRole,
+        text: String(last.content || ""),
+      };
+    }
+  }
+
   const role = pickFirstString([
     message?.role,
     message?.speaker,
@@ -19,10 +41,10 @@ export function parseRetellMessage(message) {
   ]).toLowerCase();
 
   const text = pickFirstString([
-    message?.transcript,
+    typeof message?.transcript === "string" ? message.transcript : "",
     message?.text,
     message?.content,
-    message?.message,
+    typeof message?.message === "string" ? message.message : "",
     message?.delta,
     message?.message?.content,
   ]);
@@ -32,6 +54,11 @@ export function parseRetellMessage(message) {
     normalizedRole = "assistant";
   } else if (role.includes("user") || role.includes("customer") || role.includes("human")) {
     normalizedRole = "user";
+  }
+
+  // Skip events with no useful data (heartbeats, metadata updates)
+  if (!normalizedRole && !text) {
+    return { type: "", status: "", role: "", text: "" };
   }
 
   return {
@@ -54,8 +81,8 @@ export function createRetellCallRuntime({
   onError,
   onVolumeLevel,
 }) {
-  if (!agentId) {
-    throw new Error("Retell agent is not configured.");
+  if (!accessToken) {
+    throw new Error("Retell access token is missing.");
   }
   const retell = new RetellWebClient();
 
@@ -70,9 +97,9 @@ export function createRetellCallRuntime({
     ["call_ended", () => onCallEnd?.()],
     ["agent_start_talking", () => onSpeechStart?.()],
     ["agent_stop_talking", () => onSpeechEnd?.()],
-    ["message", (message) => onMessage?.(message)],
-    ["transcript", (message) => onMessage?.(message)],
-    ["update", (message) => onMessage?.(message)],
+    ["message", (message) => { console.log("[RetellRAW] message", JSON.stringify(message).slice(0, 500)); onMessage?.(message); }],
+    ["transcript", (message) => { console.log("[RetellRAW] transcript", JSON.stringify(message).slice(0, 500)); onMessage?.(message); }],
+    ["update", (message) => { console.log("[RetellRAW] update", JSON.stringify(message).slice(0, 500)); onMessage?.(message); }],
     ["error", (error) => onError?.(error)],
     ["volume", (level) => onVolumeLevel?.(level)],
   ];
@@ -86,11 +113,11 @@ export function createRetellCallRuntime({
   return {
     async start() {
       if (typeof retell.startCall === "function") {
-        await retell.startCall({ accessToken });
+        await retell.startCall({ accessToken, ...(agentId ? { agentId } : {}) });
         return;
       }
       if (typeof retell.start === "function") {
-        await retell.start({ accessToken });
+        await retell.start({ accessToken, ...(agentId ? { agentId } : {}) });
         return;
       }
       throw new Error("Retell runtime does not expose a supported start method.");

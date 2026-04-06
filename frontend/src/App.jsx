@@ -6,6 +6,7 @@ import TasteProfile from "./TasteProfile.jsx";
 import AICallPage from "./AICallPage.jsx";
 import { dedupeRestaurants } from "./restaurantList.js";
 import { useVoiceController } from "./voice/useVoiceController.js";
+import { useVoiceOrderMode } from "./voice/useVoiceOrderMode.js";
 import { APP_QUERY_ROUTES, decideAppQueryRoute, isSelectedRestaurantSuggestionRequest } from "./voice/queryRouting.js";
 import { matchCategory, matchItem } from "./voice/voiceMatch.js";
 import { trace, traceError, traceTiming } from "./voice/trace.js";
@@ -466,6 +467,22 @@ export default function App() {
   // Last item added via voice, for quick undo
   const lastVoiceCartItemRef = useRef(null);
 
+  // Voice Order Mode — Retell/Vapi inline in chat
+  const handleVoiceOrderMessage = useCallback(({ role, text }) => {
+    if (!text?.trim()) return;
+    setMessages((prev) => [...prev, { role: role === "assistant" ? "bot" : "user", content: text.trim() }]);
+  }, []);
+  const voiceOrder = useVoiceOrderMode({
+    token,
+    language: voiceLanguage,
+    userLat,
+    userLng,
+    radiusMiles: radius,
+    onMessage: handleVoiceOrderMessage,
+    onCartUpdated: setCartData,
+    onRequireAuth: () => setTab("profile"),
+  });
+
   // ===================== EFFECTS =====================
 
   useEffect(() => {
@@ -726,12 +743,31 @@ export default function App() {
 
   const useMyLocation = () => {
     if (!navigator.geolocation) { setLocationLabel("Not supported"); return; }
-    setLocating(true);
+    setLocating(true); setLocationLabel("Detecting...");
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         const lat = pos.coords.latitude, lng = pos.coords.longitude;
         setUserLat(lat); setUserLng(lng);
-        setLocationLabel(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+        try {
+          const res = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`);
+          const geo = await res.json();
+          const city = geo.city || geo.locality || "";
+          const state = geo.principalSubdivisionCode || geo.countryCode || "";
+          const zip = geo.postcode || "";
+          setLocationLabel(city ? `${city}, ${state}` : `${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+          if (city) setCitySearch(`${city}, ${state}`);
+          if (zip) {
+            setZipcode(zip);
+            localStorage.setItem("zipcode", zip);
+          } else {
+            setZipcode("");
+            localStorage.removeItem("zipcode");
+          }
+        } catch {
+          setLocationLabel(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+          setZipcode("");
+          localStorage.removeItem("zipcode");
+        }
         await fetchRestaurantsData(lat, lng, radius);
         setLocating(false);
       },
@@ -2557,6 +2593,23 @@ export default function App() {
                     </div>
                   )}
 
+                  {/* Voice Order Mode bar (Retell/Vapi inline) */}
+                  {voiceOrder.isActive && (
+                    <div className="voice-status-bar" style={{ background: "linear-gradient(90deg, #6366f1 0%, #8b5cf6 100%)" }}>
+                      <div className={`voice-dot ${voiceOrder.callState === "listening" ? "listening" : voiceOrder.callState === "speaking" ? "speaking" : "idle"}`} />
+                      <span className="voice-status-text" style={{ color: "#fff" }}>
+                        {voiceOrder.callState === "listening" ? "🎙️ Listening..." : voiceOrder.callState === "speaking" ? "🔊 AI Speaking..." : voiceOrder.callState === "ready" ? "⏳ Connecting..." : "🎙️ Voice Order"}
+                        {voiceOrder.providerName ? ` (${voiceOrder.providerName})` : ""}
+                      </span>
+                      {voiceOrder.draftCart.length > 0 && (
+                        <span style={{ color: "#e2e8f0", fontSize: 12, marginLeft: 6 }}>
+                          {voiceOrder.draftCart.length} item{voiceOrder.draftCart.length !== 1 ? "s" : ""}
+                        </span>
+                      )}
+                      <button className="voice-end-btn" style={{ color: "#fff" }} onClick={voiceOrder.stopVoiceOrder}>✕</button>
+                    </div>
+                  )}
+
                   {/* Input */}
                   <div className="ai-chat-composer" style={{ position: 'relative' }}>
                     <form onSubmit={handleSend} className="ai-chat-input-row">
@@ -2576,6 +2629,14 @@ export default function App() {
                         aria-label="Tap to dictate. Your voice will appear as text automatically."
                         onClick={handleMicClick}
                       >{micButtonIcon}</button>
+                      <button
+                        type="button"
+                        className={`mic-btn ${voiceOrder.isActive ? "voice-active" : ""}`}
+                        title={voiceOrder.isActive ? "Stop voice order" : "Start AI voice order (Retell/Vapi)"}
+                        aria-label={voiceOrder.isActive ? "Stop voice order" : "Start AI voice order"}
+                        style={{ background: voiceOrder.isActive ? "#6366f1" : undefined, color: voiceOrder.isActive ? "#fff" : undefined, fontSize: 14 }}
+                        onClick={voiceOrder.isActive ? voiceOrder.stopVoiceOrder : voiceOrder.startVoiceOrder}
+                      >{voiceOrder.isActive ? "■" : "🎙️"}</button>
                       <button type="submit" className="send-btn">➤</button>
                     </form>
                     <div className={`voice-helper ${micButtonStateClass}`}>{voiceHelperText}</div>

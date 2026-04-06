@@ -164,9 +164,11 @@ export default function AICallPage({
   const recorderStartedAtRef = useRef(0);
   const realtimeCallRef = useRef(null);
   const realtimeModeRef = useRef(false);
+  const realtimeProviderNameRef = useRef("");
   const realtimeDisconnectingRef = useRef(false);
   const realtimeMismatchHandledRef = useRef(false);
   const realtimeFallbackInProgressRef = useRef(false);
+  const isConnectingRef = useRef(false);
   const handledRealtimeToolCallsRef = useRef(new Set());
   const vapiServerUrlRef = useRef("");
   const transcriptEndRef = useRef(null);
@@ -283,18 +285,17 @@ export default function AICallPage({
     const normalizedLanguage = normalizeCallLanguage(language);
     const providerName = String(provider?.name || "").toLowerCase();
     const assistantId = provider?.assistant_ids?.[normalizeCallLanguage(language)] || provider?.assistant_id;
-    const agentId = provider?.agent_ids?.[normalizeCallLanguage(language)] || provider?.agent_id;
 
     if (providerName === "retell") {
       return Boolean(
-        normalizedLanguage === "en-IN"
+        (normalizedLanguage === "en-IN" || normalizedLanguage === "ta-IN")
         && session?.realtime?.enabled
-        && agentId
+        && provider?.configured !== false
       );
     }
 
     return Boolean(
-      normalizedLanguage === "en-IN" &&
+      (normalizedLanguage === "en-IN" || normalizedLanguage === "ta-IN") &&
       session?.realtime?.enabled
       && providerName === "vapi"
       && provider?.public_key
@@ -624,7 +625,7 @@ export default function AICallPage({
   }
 
   function handleRealtimeMessage(message) {
-    const parsed = parseRealtimeProviderMessage(realtimeProviderName || "vapi", message);
+    const parsed = parseRealtimeProviderMessage(realtimeProviderNameRef.current || "vapi", message);
     logAICall("realtime:message", {
       type: parsed.type,
       status: parsed.status,
@@ -858,6 +859,10 @@ export default function AICallPage({
   useEffect(() => {
     realtimeModeRef.current = isRealtimeCall;
   }, [isRealtimeCall]);
+
+  useEffect(() => {
+    realtimeProviderNameRef.current = realtimeProviderName;
+  }, [realtimeProviderName]);
 
   useEffect(() => {
     handsFreeEnabledRef.current = isHandsFreeEnabled;
@@ -1096,10 +1101,6 @@ export default function AICallPage({
     if (providerName === "vapi" && !inlineAssistant && !assistantId) {
       throw new Error(`Realtime AI Call is missing a Vapi assistant for ${normalizedLanguage}.`);
     }
-    if (providerName === "retell" && !agentId) {
-      throw new Error(`Realtime AI Call is missing a Retell agent for ${normalizedLanguage}.`);
-    }
-
     let retellAccessToken = null;
     if (providerName === "retell") {
       const webCall = await createRetellWebCall({
@@ -1223,18 +1224,23 @@ export default function AICallPage({
     setRealtimeProviderName("");
     setIsRealtimeMuted(false);
     setIsHandsFreeEnabled(true);
-    applyConnectedSession(session, { statusText: "Your AI call is connected. I am listening when you speak." });
+    applyConnectedSession(session, { statusText: "Your AI call is connected. I am listening when you speak.", connectedState: AI_CALL_STATES.SPEAKING });
     logAICall("connect:session-ready", {
       sessionId: session?.session_id || "",
       language,
       historyCount: Array.isArray(session?.history) ? session.history.length : 0,
       mode: "local",
     });
-    startVoiceMonitor();
     await playAssistantReply(String(session?.assistant_reply || getCallGreeting(language)), language);
+    startVoiceMonitor();
   }
 
   async function connectCall() {
+    if (connectedRef.current || isConnectingRef.current) {
+      logAICall("connect:prevented", { reason: connectedRef.current ? "already-connected" : "already-connecting" });
+      return;
+    }
+    isConnectingRef.current = true;
     try {
       logAICall("connect:start", { language });
       const session = await createAICallRealtimeSession({ language });
@@ -1250,7 +1256,7 @@ export default function AICallPage({
         }
       }
       if (normalizedLanguage === "ta-IN" && session?.realtime?.enabled) {
-        setStatusMessage(`Tamil AI Call currently uses the local Sarvam voice path because ${providerName} does not support Tamil well enough yet.`);
+        setStatusMessage(`Tamil AI Call is using ${providerName} realtime voice. If quality is poor, it will fall back to local Sarvam voice.`);
       }
       if (session?.realtime?.enabled && Array.isArray(session?.realtime?.provider?.missing_fields) && session.realtime.provider.missing_fields.length > 0) {
         setStatusMessage(
@@ -1272,6 +1278,8 @@ export default function AICallPage({
       } else {
         setStatusMessage(error?.message || "Unable to start AI Call.");
       }
+    } finally {
+      isConnectingRef.current = false;
     }
   }
 
@@ -1288,8 +1296,10 @@ export default function AICallPage({
     draftPollRef.current = null;
     clearMonitorLoop();
     try {
-      ignoreNextStopRef.current = true;
-      mediaRecorderRef.current?.stop();
+      if (mediaRecorderRef.current) {
+        ignoreNextStopRef.current = true;
+        mediaRecorderRef.current.stop();
+      }
     } catch {
       // ignore stop errors during disconnect
     }
@@ -1411,7 +1421,8 @@ export default function AICallPage({
   async function beginListening(reason = "manual") {
     if (realtimeModeRef.current) return;
     if (!connectedRef.current || !sessionIdRef.current || mediaRecorderRef.current || finalizingRef.current || turnInFlightRef.current) return;
-    if (callStateRef.current === AI_CALL_STATES.PROCESSING) return;
+    if (callStateRef.current === AI_CALL_STATES.PROCESSING || callStateRef.current === AI_CALL_STATES.SPEAKING) return;
+    ignoreNextStopRef.current = false;
     try {
       logAICall("recording:start", { sessionId: sessionIdRef.current, callState: callStateRef.current, language, reason });
       if (!mediaStreamRef.current) {
