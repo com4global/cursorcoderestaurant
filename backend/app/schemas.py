@@ -183,6 +183,9 @@ class ChatSessionOut(BaseModel):
 class ChatMessageIn(BaseModel):
     session_id: int | None = None
     text: str
+    restaurant_id: int | None = None
+    lat: float | None = None
+    lng: float | None = None
 
 
 class ChatMessageOut(BaseModel):

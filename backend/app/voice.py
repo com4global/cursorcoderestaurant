@@ -7,6 +7,8 @@ POST /api/voice/converse  — full pipeline: audio → STT → chat engine → T
 """
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -31,6 +33,13 @@ async def get_stt_log():
 
 # ---------- STT ----------
 
+def _normalize_stt_lang(lang: str) -> str:
+    """Only en-IN or ta-IN so STT matches user selection (default English)."""
+    if lang and str(lang).strip().lower().startswith("ta"):
+        return "ta-IN"
+    return "en-IN"
+
+
 @router.post("/stt")
 async def speech_to_text(file: UploadFile = File(...), language: str = Form("en-IN")):
     """Transcribe uploaded audio using Sarvam Saaras v3."""
@@ -39,20 +48,21 @@ async def speech_to_text(file: UploadFile = File(...), language: str = Form("en-
     filename = file.filename or "audio.webm"
     content_type = file.content_type or "unknown"
     audio_kb = len(audio_bytes) / 1024
+    lang = _normalize_stt_lang(language)
 
     log_entry = {
         "ts": _time.strftime("%Y-%m-%d %H:%M:%S"),
         "filename": filename,
         "content_type": content_type,
         "audio_kb": round(audio_kb, 1),
-        "language_requested": language,
+        "language_requested": lang,
         "transcript": None,
         "detected_lang": None,
         "duration_ms": None,
         "error": None,
     }
 
-    print(f"[STT] ← {audio_kb:.1f}KB | file={filename} | type={content_type} | lang={language}")
+    print(f"[STT] ← {audio_kb:.1f}KB | file={filename} | lang={lang}")
 
     if len(audio_bytes) == 0:
         log_entry["error"] = "Empty audio"
@@ -67,7 +77,7 @@ async def speech_to_text(file: UploadFile = File(...), language: str = Form("en-
         result = sarvam_service.transcribe_audio(
             audio_bytes,
             filename=filename,
-            language_code=language,
+            language_code=lang,
         )
         elapsed = (_time.time() - t0) * 1000
         transcript = result.get("transcript", "")
@@ -97,6 +107,13 @@ class TTSRequest(BaseModel):
     speaker: str = "kavya"
 
 
+def _normalize_tts_lang(lang: str) -> str:
+    """Only en-IN or ta-IN so Sarvam output matches user selection (default English)."""
+    if lang and str(lang).strip().lower().startswith("ta"):
+        return "ta-IN"
+    return "en-IN"
+
+
 @router.post("/tts")
 async def text_to_speech(req: TTSRequest):
     """Convert text to speech using Sarvam Bulbul v3."""
@@ -108,14 +125,15 @@ async def text_to_speech(req: TTSRequest):
         # Sarvam v3 limit is 2500 chars
         req.text = req.text[:2500]
 
+    lang = _normalize_tts_lang(req.language)
     try:
         result = sarvam_service.generate_speech(
             text=req.text,
-            language=req.language,
+            language=lang,
             speaker=req.speaker,
         )
         elapsed = (time.time() - t0) * 1000
-        print(f"[TTS] \u23f1 {elapsed:.0f}ms | text=\"{req.text[:60]}{'...' if len(req.text) > 60 else ''}\"")
+        print(f"[TTS] \u23f1 {elapsed:.0f}ms | lang={lang} | text=\"{req.text[:60]}{'...' if len(req.text) > 60 else ''}\"")
         return result
     except RuntimeError as e:
         raise HTTPException(502, str(e))
@@ -128,11 +146,36 @@ class ChatRequest(BaseModel):
     context: str = ""
 
 
+_VOICE_GROUP_PHRASES = (
+    "group order", "group ordering", "start a group order", "order as a group",
+    "group lunch", "group dinner", "office lunch", "company lunch",
+    "order for the team", "order for the office",
+)
+_VOICE_GROUP_PATTERN = re.compile(
+    r"(?:find|get|order|want|need)\s+(?:food|meals?|lunch|dinner)\s+for\s+(\d+)\s+people",
+    re.I,
+)
+
+
+def _voice_group_order_response(message: str) -> dict | None:
+    lower = message.lower().strip()
+    if any(phrase in lower for phrase in _VOICE_GROUP_PHRASES) or _VOICE_GROUP_PATTERN.search(lower):
+        return {
+            "reply": "Open the Group Order tab to start a group order. Share the link with friends, add their preferences, and get AI recommendations for the whole group!",
+            "open_group_tab": True,
+        }
+    return None
+
+
 @router.post("/chat")
 async def voice_chat(req: ChatRequest):
     """Get intelligent response from Sarvam AI agent."""
     if not req.message.strip():
         raise HTTPException(400, "Message cannot be empty")
+
+    group_intent = _voice_group_order_response(req.message)
+    if group_intent is not None:
+        return group_intent
 
     system_prompt = (
         "You are a friendly restaurant ordering assistant. "

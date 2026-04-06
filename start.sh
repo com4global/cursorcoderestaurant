@@ -1,7 +1,8 @@
 #!/bin/bash
 # Start backend and frontend for RestaurantAI
 set -e
-cd "$(dirname "$0")"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
 
 # Kill anything on our ports first
 for port in 8000 5173; do
@@ -10,14 +11,12 @@ done
 sleep 1
 
 echo "Starting backend on http://127.0.0.1:8000 ..."
-cd backend && python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+(cd "$ROOT/backend" && python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000) &
 BACKEND_PID=$!
-cd ..
 
 echo "Starting frontend on http://localhost:5173 ..."
-cd frontend && npm run dev &
+(cd "$ROOT/frontend" && npm run dev) &
 FRONTEND_PID=$!
-cd ..
 
 echo ""
 echo "Backend PID: $BACKEND_PID  (http://127.0.0.1:8000)"

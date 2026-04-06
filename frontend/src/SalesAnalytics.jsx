@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { fetchAnalytics } from "./api.js";
+import { fetchAnalytics, fetchCallOrderAdminSummary } from "./api.js";
 
 const STATUS_COLORS = {
     completed: "#22c55e",
@@ -17,10 +17,16 @@ export default function SalesAnalytics({ token, restaurantId, restaurantName }) 
     const [customTo, setCustomTo] = useState("");
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [callSummary, setCallSummary] = useState(null);
+    const [callSummaryLoading, setCallSummaryLoading] = useState(true);
 
     useEffect(() => {
         loadData();
     }, [period]);
+
+    useEffect(() => {
+        loadCallSummary();
+    }, [token]);
 
     async function loadData() {
         setLoading(true);
@@ -37,6 +43,17 @@ export default function SalesAnalytics({ token, restaurantId, restaurantName }) 
         setLoading(false);
     }
 
+    async function loadCallSummary() {
+        setCallSummaryLoading(true);
+        try {
+            const summary = await fetchCallOrderAdminSummary(token);
+            setCallSummary(summary);
+        } catch {
+            setCallSummary(null);
+        }
+        setCallSummaryLoading(false);
+    }
+
     function fmt(cents) {
         return "$" + (cents / 100).toFixed(2);
     }
@@ -44,6 +61,18 @@ export default function SalesAnalytics({ token, restaurantId, restaurantName }) 
     function fmtShort(cents) {
         if (cents >= 100000) return "$" + (cents / 100000).toFixed(1) + "k";
         return "$" + (cents / 100).toFixed(0);
+    }
+
+    function formatTimestamp(value) {
+        if (!value) return "No active sessions yet";
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return "No active sessions yet";
+        return date.toLocaleString([], {
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+        });
     }
 
     if (loading && !data) {
@@ -115,6 +144,65 @@ export default function SalesAnalytics({ token, restaurantId, restaurantName }) 
                     <div className="sales-card-value">{fmt(summary.avg_order_cents)}</div>
                     <div className="sales-card-label">Avg Order Value</div>
                 </div>
+            </div>
+
+            <div className="sales-chart-section sales-call-summary">
+                <div className="sales-call-summary-header">
+                    <div>
+                        <h4>AI Call Session Retention</h4>
+                        <p className="sales-call-summary-copy">Workspace-wide persistence snapshot for the separate voice ordering flow.</p>
+                    </div>
+                    {callSummary && <span className="sales-call-summary-ttl">TTL {callSummary.ttl_minutes} min</span>}
+                </div>
+                {callSummaryLoading && <p className="sales-empty">Loading AI Call retention...</p>}
+                {!callSummaryLoading && !callSummary && (
+                    <p className="sales-empty">AI Call retention summary is unavailable for this account.</p>
+                )}
+                {!callSummaryLoading && callSummary && (
+                    <>
+                        <div className="sales-call-summary-grid">
+                            <div className="sales-card sales-card-call-total">
+                                <div className="sales-card-icon">☎️</div>
+                                <div className="sales-card-value">{callSummary.total_sessions}</div>
+                                <div className="sales-card-label">Persisted Sessions</div>
+                            </div>
+                            <div className="sales-card sales-card-call-active">
+                                <div className="sales-card-icon">🟢</div>
+                                <div className="sales-card-value">{callSummary.active_sessions}</div>
+                                <div className="sales-card-label">Active Inside TTL</div>
+                            </div>
+                            <div className="sales-card sales-card-call-expired">
+                                <div className="sales-card-icon">⏳</div>
+                                <div className="sales-card-value">{callSummary.expired_sessions}</div>
+                                <div className="sales-card-label">Expired Pending Cleanup</div>
+                            </div>
+                        </div>
+                        <div className="sales-call-trend-grid">
+                            <div className="sales-call-trend-card">
+                                <span className="sales-call-trend-label">Created 24h</span>
+                                <strong>{callSummary.sessions_created_last_24h}</strong>
+                            </div>
+                            <div className="sales-call-trend-card">
+                                <span className="sales-call-trend-label">Created 7d</span>
+                                <strong>{callSummary.sessions_created_last_7d}</strong>
+                            </div>
+                            <div className="sales-call-trend-card">
+                                <span className="sales-call-trend-label">Touched 24h</span>
+                                <strong>{callSummary.sessions_updated_last_24h}</strong>
+                            </div>
+                        </div>
+                        <div className="sales-call-summary-meta">
+                            <div>
+                                <span className="sales-call-summary-meta-label">Oldest active update</span>
+                                <strong>{formatTimestamp(callSummary.oldest_active_updated_at)}</strong>
+                            </div>
+                            <div>
+                                <span className="sales-call-summary-meta-label">Newest active update</span>
+                                <strong>{formatTimestamp(callSummary.newest_active_updated_at)}</strong>
+                            </div>
+                        </div>
+                    </>
+                )}
             </div>
 
             {/* Revenue Chart */}

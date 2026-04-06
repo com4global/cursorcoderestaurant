@@ -32,4 +32,13 @@ export function traceError(tag, err, extra = {}) {
   console.error(`${PREFIX} ${tag}`, { ts, tag, error: err?.message || String(err), stack: err?.stack, ...extra });
 }
 
+/** Log elapsed ms since start (for voice latency debugging). Use: const t0 = performance.now(); ... traceTiming('stepName', t0); */
+export function traceTiming(step, startTime, extra = {}) {
+  if (!ENABLED || typeof console === 'undefined') return;
+  const elapsedMs = Math.round((performance.now() - startTime) * 10) / 10;
+  const payload = { step, elapsedMs, ts: new Date().toISOString().slice(11, 23), ...extra };
+  console.log(`${PREFIX} voice.timing`, payload);
+  return elapsedMs;
+}
+
 export default trace;

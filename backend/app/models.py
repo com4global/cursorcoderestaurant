@@ -203,6 +203,23 @@ class Payment(Base):
     user = relationship("User", backref="payments")
 
 
+class CallOrderSession(Base):
+    __tablename__ = "call_order_sessions"
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(String(64), unique=True, index=True, nullable=False)
+    language = Column(String(16), nullable=False)
+    state = Column(String(40), default="ready", nullable=False)
+    history_json = Column(Text, nullable=False, default="[]")
+    selected_restaurant_json = Column(Text, nullable=True)
+    selected_item_json = Column(Text, nullable=True)
+    draft_cart_json = Column(Text, nullable=False, default="[]")
+    pending_action_json = Column(Text, nullable=True)
+    last_assistant_reply = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 # --- Group Ordering ---
 
 class GroupOrderSession(Base):

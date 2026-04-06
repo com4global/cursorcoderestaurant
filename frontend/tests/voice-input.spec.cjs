@@ -72,6 +72,56 @@ async function injectVoiceMocks(page) {
     });
 }
 
+async function injectVoiceMocksWithTranscript(page, transcript, startDelay = 300) {
+    await page.addInitScript(
+        ({ transcript, startDelay }) => {
+            navigator.mediaDevices.getUserMedia = async () => ({
+                getTracks: () => [{ stop: () => {} }],
+            });
+
+            window.speechSynthesis = {
+                cancel: () => {},
+                speak: (u) => { setTimeout(() => { if (u.onend) u.onend(new Event('end')); }, 80); },
+                speaking: false,
+                pending: false,
+                paused: false,
+                getVoices: () => [],
+                addEventListener: () => {},
+                removeEventListener: () => {},
+            };
+
+            class MockSR {
+                constructor() {
+                    this.onstart = null;
+                    this.onresult = null;
+                    this.onerror = null;
+                    this.onend = null;
+                }
+                start() {
+                    setTimeout(() => this.onstart?.(), 50);
+                    setTimeout(() => {
+                        this.onresult?.({
+                            resultIndex: 0,
+                            results: [{
+                                isFinal: true,
+                                0: { transcript, confidence: 0.95 },
+                                length: 1,
+                            }],
+                            length: 1,
+                        });
+                        this.onend?.();
+                    }, startDelay);
+                }
+                stop() { this.onend?.(); }
+                abort() {}
+            }
+            window.SpeechRecognition = MockSR;
+            window.webkitSpeechRecognition = MockSR;
+        },
+        { transcript, startDelay }
+    );
+}
+
 /** Inject mock that DENIES microphone permission */
 async function injectDeniedMicMock(page) {
     await page.addInitScript(() => {
@@ -97,32 +147,31 @@ test.describe('Voice Input', () => {
     test('should show mic button on Chat tab', async ({ page }) => {
         await loginAndGoToChat(page);
 
-        const micBtn = page.locator('.mic-btn');
+        const micBtn = page.locator('.mic-btn-ptt');
         await expect(micBtn).toBeVisible({ timeout: 5000 });
         await expect(micBtn).toContainText('🎤');
     });
 
-    test('should toggle voice mode on and off', async ({ page }) => {
+    test('should start and stop tap-to-dictate recording', async ({ page }) => {
         await injectVoiceMocks(page);
         await loginAndGoToChat(page);
 
-        const micBtn = page.locator('.mic-btn');
+        const micBtn = page.locator('.mic-btn-ptt');
         await expect(micBtn).toBeVisible({ timeout: 5000 });
 
-        // Activate voice mode
-        await micBtn.click();
-        await page.waitForTimeout(2000);
-
-        // Mic should be active with status bar visible
-        await expect(micBtn).toHaveClass(/voice-active/, { timeout: 5000 });
-        await expect(micBtn).toContainText('🔴');
-        await expect(page.locator('.voice-status-bar')).toBeVisible({ timeout: 3000 });
-
-        // Deactivate
+        // Start recording
         await micBtn.click();
         await page.waitForTimeout(500);
 
-        await expect(micBtn).not.toHaveClass(/voice-active/);
+        await expect(micBtn).toHaveClass(/voice-active/, { timeout: 5000 });
+        await expect(micBtn).toContainText('■');
+        await expect(page.locator('.voice-status-bar')).toBeVisible({ timeout: 3000 });
+
+        // Stop recording
+        await micBtn.click();
+        await page.waitForTimeout(1000);
+
+        await expect(micBtn).not.toHaveClass(/recording/);
         await expect(micBtn).toContainText('🎤');
         await expect(page.locator('.voice-status-bar')).not.toBeVisible();
     });
@@ -131,9 +180,9 @@ test.describe('Voice Input', () => {
         await injectVoiceMocks(page);
         await loginAndGoToChat(page);
 
-        const micBtn = page.locator('.mic-btn');
+        const micBtn = page.locator('.mic-btn-ptt');
         await micBtn.click();
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(500);
 
         const endBtn = page.locator('.voice-end-btn');
         await expect(endBtn).toBeVisible({ timeout: 3000 });
@@ -144,38 +193,48 @@ test.describe('Voice Input', () => {
         await expect(micBtn).not.toHaveClass(/voice-active/);
     });
 
-    test('should update placeholder in voice mode', async ({ page }) => {
+    test('should update placeholder in dictation mode', async ({ page }) => {
         await injectVoiceMocks(page);
         await loginAndGoToChat(page);
 
         const chatInput = page.locator('.ai-chat-input');
         const defaultPlaceholder = await chatInput.getAttribute('placeholder');
-        expect(defaultPlaceholder).toContain('restaurant');
+        expect(defaultPlaceholder).toContain('Tap');
 
-        const micBtn = page.locator('.mic-btn');
-        await micBtn.click();
-        await page.waitForTimeout(2000);
-
-        const voicePlaceholder = await chatInput.getAttribute('placeholder');
-        expect(voicePlaceholder).toContain('Voice active');
-
+        const micBtn = page.locator('.mic-btn-ptt');
         await micBtn.click();
         await page.waitForTimeout(500);
 
+        const voicePlaceholder = await chatInput.getAttribute('placeholder');
+        expect(voicePlaceholder).toContain('Speak naturally');
+
+        await micBtn.click();
+        await page.waitForTimeout(1000);
+
         const reverted = await chatInput.getAttribute('placeholder');
-        expect(reverted).toContain('restaurant');
+        expect(reverted).toContain('Tap');
     });
 
     test('should block voice mode when mic is denied', async ({ page }) => {
         await injectDeniedMicMock(page);
         await loginAndGoToChat(page);
 
-        const micBtn = page.locator('.mic-btn');
+        const micBtn = page.locator('.mic-btn-ptt');
         await micBtn.click();
         await page.waitForTimeout(1500);
 
         // Voice mode should NOT activate
         await expect(micBtn).not.toHaveClass(/voice-active/);
         await expect(micBtn).toContainText('🎤');
+    });
+
+    test('should place final voice transcript into the composer', async ({ page }) => {
+        await injectVoiceMocksWithTranscript(page, 'show me biryani');
+        await loginAndGoToChat(page);
+
+        const micBtn = page.locator('.mic-btn-ptt');
+        await micBtn.click();
+        await expect(page.locator('.ai-chat-input')).toHaveValue(/show me biryani/i, { timeout: 6000 });
+        await expect(micBtn).toHaveClass(/voice-active|recording|idle/);
     });
 });

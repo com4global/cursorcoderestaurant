@@ -21,6 +21,8 @@ from .db import get_db, engine
 from .voice import router as voice_router
 from .voice_ws import router as voice_ws_router
 from .ai_dashboard import router as ai_dashboard_router
+from .call_order import router as call_order_router
+from .ai_call_realtime import router as ai_call_realtime_router
 
 try:
     models.Base.metadata.create_all(bind=engine)
@@ -133,6 +135,8 @@ app = FastAPI(title="RestarentAI")
 app.include_router(voice_router)
 app.include_router(voice_ws_router)
 app.include_router(ai_dashboard_router)
+app.include_router(call_order_router)
+app.include_router(ai_call_realtime_router)
 
 @app.on_event("startup")
 def startup_event():
@@ -452,7 +456,8 @@ def restaurants(
         results.sort(key=lambda x: x.distance_miles if x.distance_miles is not None else 9999)
         return results
 
-    return all_restaurants
+    # No geo: return all restaurants as RestaurantOut (consistent serialization)
+    return [schemas.RestaurantOut.model_validate(r) for r in all_restaurants]
 
 
 # ── Cross-Restaurant Price Comparison ─────────────────────────────────
@@ -623,8 +628,8 @@ def search_by_intent(req: IntentSearchRequest, db: Session = Depends(get_db)):
     if not text:
         raise HTTPException(400, "Text is required")
 
-    # Extract structured intent from user message
-    intent = intent_extractor.extract_intent(text, use_llm=False)
+    # Extract structured intent from user message (use LLM + local hybrid extractor)
+    intent = intent_extractor.extract_intent(text, use_llm=True)
 
     # Build query
     query = (
@@ -1055,8 +1060,23 @@ def send_message(
         if not session or session.user_id != current_user.id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
+    if "restaurant_id" in payload.model_fields_set:
+        requested_restaurant_id = payload.restaurant_id
+        if requested_restaurant_id is None:
+            if session.restaurant_id is not None or session.category_id is not None or session.order_id is not None:
+                chat._set_session_state(db, session, restaurant_id=None, category_id=None, order_id=None)
+        elif session.restaurant_id != requested_restaurant_id:
+            existing_order = crud.get_user_order_for_restaurant(db, current_user.id, requested_restaurant_id)
+            chat._set_session_state(
+                db,
+                session,
+                restaurant_id=requested_restaurant_id,
+                category_id=None,
+                order_id=existing_order.id if existing_order else None,
+            )
+
     crud.add_chat_message(db, session.id, "user", payload.text)
-    result = chat.process_message(db, session, payload.text)
+    result = chat.process_message(db, session, payload.text, user_lat=payload.lat, user_lng=payload.lng)
     crud.add_chat_message(db, session.id, "bot", result["reply"])
 
     return schemas.ChatMessageOut(

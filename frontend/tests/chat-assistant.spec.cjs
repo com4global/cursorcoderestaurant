@@ -63,16 +63,15 @@ test.describe('Chat & AI Assistant', () => {
         await loginAsCustomer(page);
         await selectRestaurant(page);
         await expect(page.locator('.ai-chat-input')).toBeVisible({ timeout: 5000 });
-        // Add an item via chat (type item name; bot may add it if menu has it)
-        await page.locator('.ai-chat-input').fill('biryani');
-        await page.locator('.send-btn').click();
-        await page.waitForTimeout(5000);
+        const botBubbles = page.locator('.ai-bubble');
+        const previousBotText = await botBubbles.last().textContent();
         // Clear the cart via chat
         await page.locator('.ai-chat-input').fill('clear the cart');
         await page.locator('.send-btn').click();
-        await page.waitForTimeout(5000);
-        // Bot should reply with "Cart cleared"
-        await expect(page.locator('.ai-bubble').filter({ hasText: /Cart cleared/i })).toBeVisible({ timeout: 8000 });
+        // Frontend should handle clear-cart locally instead of falling through to backend item search.
+        await expect(botBubbles.last()).not.toHaveText(previousBotText || '', { timeout: 8000 });
+        await expect(botBubbles.last()).toContainText(/Cart cleared|already empty/i, { timeout: 8000 });
+        await expect(page.locator('.ai-bubble').filter({ hasText: /Found \d+ items matching/i })).toHaveCount(0);
     });
 
     test('change the restaurant via chat gets a reply', async ({ page }) => {

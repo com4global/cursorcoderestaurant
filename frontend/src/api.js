@@ -1,5 +1,7 @@
-// In dev, use same origin so Vite proxy forwards to backend (no CORS); in prod use env or default
-const API_BASE = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || "http://localhost:8000");
+// In dev, use same origin so Vite proxy forwards to backend (no CORS).
+// In prod (including iOS), localhost is not reachable from device, so use hosted backend by default.
+const PROD_API_BASE = "https://backend-iota-navy-64.vercel.app";
+const API_BASE = import.meta.env.DEV ? "" : (import.meta.env.VITE_API_BASE || PROD_API_BASE);
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, options);
@@ -62,6 +64,11 @@ export async function listRestaurants({ lat, lng, radius_miles } = {}) {
 
 export async function searchMenuItems(query) {
   return request(`/search/menu-items?q=${encodeURIComponent(query)}`);
+}
+
+/** Fetch categories for a restaurant (no auth required). Used when opening a restaurant menu. */
+export async function fetchRestaurantCategories(restaurantId) {
+  return request(`/restaurants/${restaurantId}/categories`);
 }
 
 /** Fetch menu items for a category (no auth required). Used when guest clicks a category. */
@@ -311,9 +318,10 @@ export async function getTasteRecommendations(token, limit = 10) {
 
 // --- Sarvam AI Voice APIs ---
 
-export async function voiceSTT(audioBlob) {
+export async function voiceSTT(audioBlob, language = "en-IN") {
   const formData = new FormData();
   formData.append("file", audioBlob, "audio.webm");
+  formData.append("language", language);
   const resp = await fetch(`${API_BASE}/api/voice/stt`, {
     method: "POST",
     body: formData,
@@ -349,6 +357,117 @@ export async function voiceChat(message, context = "") {
     throw new Error(text || "Chat failed");
   }
   return resp.json(); // { reply }
+}
+
+export async function createCallOrderSession(language = "en-IN") {
+  return request("/api/call-order/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ language }),
+  });
+}
+
+export async function getCallOrderSession(sessionId) {
+  return request(`/api/call-order/session/${encodeURIComponent(sessionId)}`);
+}
+
+export async function callOrderTurn(sessionId, transcript) {
+  return request("/api/call-order/turn", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, transcript }),
+  });
+}
+
+export async function finalizeCallOrderSession(token, sessionId) {
+  return request(`/api/call-order/session/${encodeURIComponent(sessionId)}/finalize`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function fetchCallOrderAdminSummary(token) {
+  return request("/api/call-order/admin/summary", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function createAICallRealtimeSession(payload = {}) {
+  return request("/api/call-order/realtime/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function createRetellWebCall(payload = {}) {
+  return request("/api/call-order/realtime/create-web-call", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getAICallRealtimeProviderConfig() {
+  return request("/api/call-order/realtime/provider-config");
+}
+
+export async function aiCallRealtimeListRestaurants(sessionId, query = "", limit = 8, { lat, lng, radius_miles } = {}) {
+  return request("/api/call-order/realtime/tools/list-restaurants", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, query: query || undefined, limit, lat: lat ?? undefined, lng: lng ?? undefined, radius_miles: radius_miles ?? undefined }),
+  });
+}
+
+export async function aiCallRealtimeFindRestaurants(sessionId, query, { lat, lng, radius_miles } = {}) {
+  return request("/api/call-order/realtime/tools/find-restaurants", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, query, lat: lat ?? undefined, lng: lng ?? undefined, radius_miles: radius_miles ?? undefined }),
+  });
+}
+
+export async function aiCallRealtimeGetMenu(sessionId, restaurantId, restaurantName, query = "", knownRestaurantIds = []) {
+  return request("/api/call-order/realtime/tools/menu", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, restaurant_id: restaurantId != null ? restaurantId : undefined, restaurant_name: restaurantName || undefined, query: query || undefined, known_restaurant_ids: knownRestaurantIds }),
+  });
+}
+
+export async function aiCallRealtimeGetDraftSummary(sessionId) {
+  return request(`/api/call-order/realtime/tools/draft-summary/${encodeURIComponent(sessionId)}`);
+}
+
+export async function aiCallRealtimeAddItem(sessionId, itemId, quantity = 1, itemName = "", restaurantId = null) {
+  const body = { session_id: sessionId, item_id: itemId, quantity };
+  if (itemName) body.item_name = itemName;
+  if (restaurantId != null) body.restaurant_id = restaurantId;
+  return request("/api/call-order/realtime/tools/add-item", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function aiCallRealtimeRemoveItem(sessionId, itemId, quantity = 1, itemName = "", restaurantId = null) {
+  const body = { session_id: sessionId, item_id: itemId, quantity };
+  if (itemName) body.item_name = itemName;
+  if (restaurantId != null) body.restaurant_id = restaurantId;
+  return request("/api/call-order/realtime/tools/remove-item", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function aiCallRealtimeStartCheckout(token, sessionId) {
+  return request("/api/call-order/realtime/tools/start-checkout", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
 }
 
 // --- Payment APIs ---

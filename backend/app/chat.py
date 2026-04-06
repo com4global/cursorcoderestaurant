@@ -12,13 +12,15 @@ Returns dicts with:
 from __future__ import annotations
 
 import re
+from math import asin, cos, radians, sin, sqrt
 from datetime import datetime
 from difflib import SequenceMatcher
 
 from sqlalchemy.orm import Session
 
 from . import crud
-from .models import ChatSession, MenuItem, Order
+from .models import ChatSession, MenuItem, Order, Restaurant
+from .multi_order_extractor import extract_multi_order
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +158,80 @@ _RESTAURANT_INTENTS = [
     r"(?:take me to|switch to|change to)\s+(.+)",
 ]
 
+_TAMIL_SCRIPT_RE = re.compile(r'[\u0B80-\u0BFF]')
+_MIXED_ORDER_CONNECTORS = (
+    "அப்புறம்", "அதுக்கப்புறம்", "பிறகு", "மற்றும்", "அடுத்து", "கூட",
+)
+
+
+def _debug_log_mixed_order(stage: str, **fields) -> None:
+    parts = []
+    for key, value in fields.items():
+        if value is None:
+            continue
+        text = str(value).replace("\n", " ").strip()
+        if len(text) > 240:
+            text = text[:237] + "..."
+        parts.append(f"{key}={text}")
+    suffix = " | " + " | ".join(parts) if parts else ""
+    print(f"[chat.mixed-order] {stage}{suffix}")
+
+
+def _should_try_mixed_order_normalization(text: str, session_has_restaurant: bool = False) -> bool:
+    lower = text.lower().strip()
+    if not lower or not _TAMIL_SCRIPT_RE.search(text):
+        return False
+    has_food_signal = bool(re.search(
+        r'\b(biryani|soup|naan|butter|chicken|mutton|pizza|dosa|idli|coffee|tea|rice|curry|burger|fried\s+rice)\b',
+        lower,
+    ))
+    has_connector = any(token in text for token in _MIXED_ORDER_CONNECTORS)
+    has_multiple_quantities = len(re.findall(
+        r'(?<!\S)(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+',
+        lower,
+    )) >= 2
+    has_restaurant_hint = "restaurant" in lower or "district" in lower or "ரெஸ்டார" in text
+    return has_food_signal and (has_connector or has_multiple_quantities or has_restaurant_hint or session_has_restaurant)
+
+
+def _normalize_mixed_voice_order_text(text: str, current_restaurant_name: str | None = None) -> str | None:
+    if not _should_try_mixed_order_normalization(text, bool(current_restaurant_name)):
+        return None
+
+    try:
+        from . import sarvam_service
+
+        system_prompt = (
+            "You normalize mixed Tamil-English food ordering transcripts into short English order text. "
+            "Preserve quantities, menu item names, and restaurant names. "
+            "If a restaurant is implied by context, use that exact restaurant name. "
+            "If spoken Tamil sounds like an English restaurant name, convert it to the most likely restaurant name. "
+            "Return plain text only, with concise clauses like: 1 mutton bone soup from Anjappar and 1 butter naan from Desi District. "
+            "Do not explain anything."
+        )
+        context = f"Current restaurant: {current_restaurant_name}" if current_restaurant_name else ""
+        normalized = sarvam_service.chat_completion(text, system_prompt, context).strip()
+        normalized = re.sub(r'^```(?:text)?\s*', '', normalized)
+        normalized = re.sub(r'\s*```$', '', normalized).strip()
+        if not normalized:
+            return None
+        normalized_lower = normalized.lower()
+        if (
+            len(normalized) > 220
+            or '\n' in normalized
+            or normalized_lower.count('from ') == 0
+            or any(marker in normalized_lower for marker in (
+                "let's", "user", "input", "instructions", "query", "breaking it down",
+                "the restaurants mentioned", "the menu items", "the structure should",
+            ))
+        ):
+            return None
+        if normalized.lower() == text.lower().strip():
+            return None
+        return normalized
+    except Exception:
+        return None
+
 
 def _extract_restaurant_name(text: str) -> str | None:
     """Extract restaurant name from natural language input."""
@@ -199,76 +275,271 @@ def _extract_item_after_restaurant(text: str) -> str | None:
     return None
 
 
-def _parse_multi_restaurant_order(cleaned: str, lower: str, all_restaurants: list, db: Session, user_id: int) -> list | None:
+def _parse_multi_restaurant_order_sequence(lower: str, all_restaurants: list, db: Session,
+                                           user_lat: float | None = None,
+                                           user_lng: float | None = None):
+    pattern = re.compile(
+        rf'(?:^|\s+(?:and\s+)?)'
+        rf'(?:(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+)?'
+        rf'(.+?)\s+from\s+(.+?)'
+        rf'(?=(?:\s+(?:and\s+)?(?:(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+.+?\s+from\s+))|$)',
+        re.IGNORECASE,
+    )
+    matches = list(pattern.finditer(lower))
+    if len(matches) < 2:
+        return None, None
+
+    word_nums = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                 "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+    found = []
+    missing = []
+    for match in matches:
+        qty_str = match.group(1)
+        item_phrase = match.group(2).strip(" ,")
+        rest_phrase = match.group(3).strip(" ,")
+        qty = word_nums.get(qty_str, int(qty_str) if qty_str and qty_str.isdigit() else 1)
+        restaurant = _find_best_restaurant(rest_phrase, all_restaurants, user_lat=user_lat, user_lng=user_lng)
+        if not restaurant:
+            return None, None
+        all_items = _get_all_restaurant_items(db, restaurant.id)
+        parsed = _parse_order_items(item_phrase, all_items)
+        if parsed:
+            if qty != 1 and len(parsed) == 1 and parsed[0][1] == 1:
+                found.append((restaurant, [(parsed[0][0], qty)]))
+            else:
+                found.append((restaurant, parsed))
+            continue
+        single = _find_best_item(item_phrase, all_items)
+        if single:
+            found.append((restaurant, [(single, qty)]))
+        else:
+            missing.append((restaurant, item_phrase, qty))
+
+    return (found, missing) if (found or missing) else (None, None)
+
+
+def _parse_multi_restaurant_order(cleaned: str, lower: str, all_restaurants: list, db: Session, user_id: int,
+                                  user_lat: float | None = None,
+                                  user_lng: float | None = None):
     """
     Parse "2 chicken biryani from Aroma and 1 chicken lollipop from Desi District".
-    Returns list of (restaurant, [(menu_item, qty), ...]) or None if not matched.
+    Returns (found, missing) where:
+      found   = list of (restaurant, [(menu_item, qty)])  — items matched
+      missing = list of (restaurant, item_phrase, qty)    — items not matched (ask user)
+    Returns (None, None) if input doesn't look like a multi-restaurant order at all.
     """
-    # Split by " and " or ", and " (with optional spaces)
+    found_sequence, missing_sequence = _parse_multi_restaurant_order_sequence(
+        lower,
+        all_restaurants,
+        db,
+        user_lat=user_lat,
+        user_lng=user_lng,
+    )
+    if found_sequence is not None or missing_sequence is not None:
+        return found_sequence, missing_sequence
+
     parts = re.split(r"\s+and\s+|\s*,\s*and\s*", lower)
     if len(parts) < 2:
-        return None
+        return None, None
     prefix_strip = r"^(?:i\s+would\s+like\s+to\s+|i\s+want\s+to\s+|please\s+)?(?:order|get|add)\s+"
-    segments = []
+    found = []
+    missing = []
     for part in parts:
         part = re.sub(prefix_strip, "", part.strip()).strip()
         if not part:
             continue
-        # "2 chicken biryani from aroma" or "chicken lollipop from desi district"
-        m = re.search(r"^(?:(\d+)\s+)?(.+?)\s+from\s+(.+)$", part)
+        m = re.search(r"^(?:(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+)?(.+?)\s+from\s+(.+)$", part)
         if not m:
-            return None
+            return None, None
         qty_str, item_phrase, rest_phrase = m.group(1), m.group(2).strip(), m.group(3).strip()
-        qty = int(qty_str) if qty_str else 1
-        restaurant = _find_best_restaurant(rest_phrase, all_restaurants)
+        # Convert word numbers to int
+        _word_nums = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                      "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+        qty = _word_nums.get(qty_str, int(qty_str) if qty_str and qty_str.isdigit() else 1)
+        restaurant = _find_best_restaurant(rest_phrase, all_restaurants, user_lat=user_lat, user_lng=user_lng)
         if not restaurant:
-            return None
+            return None, None
         all_items = _get_all_restaurant_items(db, restaurant.id)
         parsed = _parse_order_items(item_phrase, all_items)
         if not parsed:
             single = _find_best_item(item_phrase, all_items)
             if single:
-                parsed = [(single, qty)]
+                found.append((restaurant, [(single, qty)]))
             else:
-                return None
+                missing.append((restaurant, item_phrase, qty))
         else:
-            parsed = [(parsed[0][0], qty)]
-        segments.append((restaurant, parsed))
+            found.append((restaurant, [(parsed[0][0], qty)]))
 
-    if not segments:
+    if not found and not missing:
+        return None, None
+    return found, missing
+
+
+def _apply_multi_order_result(db: Session, user_id: int, llm_orders: list, all_restaurants: list,
+                              user_lat: float | None = None,
+                              user_lng: float | None = None) -> list | None:
+    """
+    Resolve LLM-extracted multi-order (list of {restaurant_name, items: [{item_name, quantity}]})
+    to (restaurant, [(menu_item, qty)]) using existing matchers. Returns None if any resolve fails.
+    """
+    found = []
+    missing = []
+    for o in llm_orders:
+        rest_name = (o.get("restaurant_name") or "").strip()
+        items_raw = o.get("items") or []
+        if not rest_name:
+            return None, None
+        restaurant = _find_best_restaurant(rest_name, all_restaurants, user_lat=user_lat, user_lng=user_lng)
+        if not restaurant:
+            return None, None
+        all_items = _get_all_restaurant_items(db, restaurant.id)
+        for it in items_raw:
+            iname = (it.get("item_name") or "").strip()
+            qty = it.get("quantity", 1)
+            if not iname:
+                continue
+            try:
+                qty = int(qty) if qty is not None else 1
+            except (TypeError, ValueError):
+                qty = 1
+            if qty < 1:
+                qty = 1
+            menu_item = _find_best_item(iname, all_items)
+            if menu_item:
+                found.append((restaurant, [(menu_item, qty)]))
+            else:
+                missing.append((restaurant, iname, qty))
+    if not found and not missing:
+        return None, None
+    return found, missing
+
+
+def _execute_multi_order(db: Session, user_id: int, found: list, missing: list, session: ChatSession | None = None) -> dict:
+    """
+    Add all found items to cart. For missing items, show that restaurant's categories
+    and ask the user to clarify. Returns a _result() dict.
+    """
+    added_lines = []
+    for rest, item_list in found:
+        order = crud.get_user_order_for_restaurant(db, user_id, rest.id)
+        if not order:
+            order = crud.create_order(db, user_id, rest.id)
+        for menu_item, qty in item_list:
+            crud.add_order_item(db, order, menu_item, qty)
+        crud.recompute_order_total(db, order)
+        for menu_item, qty in item_list:
+            added_lines.append(f"  **{rest.name}:** {qty}x {menu_item.name} — ${menu_item.price_cents * qty / 100:.2f}")
+
+    clarify_lines = []
+    clarify_voice = []
+    for rest, item_phrase, qty in missing:
+        cats = _categories_data(db, rest.id)
+        cat_names = ", ".join(c["name"] for c in cats[:6]) if cats else "browse their menu"
+        all_items = _get_all_restaurant_items(db, rest.id)
+        options = _find_matching_items(item_phrase, all_items, limit=3)
+        option_text = ""
+        option_voice = ""
+        if options:
+            option_names = ", ".join(item.name for item in options)
+            option_text = f"\n  Closest matches: {option_names}."
+            option_voice = f" Closest matches are {option_names}."
+        clarify_lines.append(
+            f"  I couldn't find **{item_phrase}** at **{rest.name}**.\n"
+            f"  Their categories: {cat_names}.\n"
+            f"  What would you like from {rest.name}?{option_text}"
+        )
+        clarify_voice.append(
+            f"I couldn't find {item_phrase} at {rest.name}. "
+            f"They have: {cat_names}. What would you like from there?{option_voice}"
+        )
+
+    cart = _build_cart_summary_chat(db, user_id)
+    rest_names = ", ".join(r.name for r, _ in found)
+
+    reply_parts = []
+    if added_lines:
+        reply_parts.append("Added to your orders:\n" + "\n".join(added_lines))
+    if clarify_lines:
+        reply_parts.append("\n".join(clarify_lines))
+    if not clarify_lines and added_lines:
+        reply_parts.append("Go to Cart to review or add more from each restaurant.")
+
+    reply = "\n\n".join(reply_parts)
+
+    if clarify_voice:
+        voice_prompt = " ".join(clarify_voice)
+    elif rest_names:
+        voice_prompt = f"Added items from {rest_names}. Go to cart to review or say done to finish."
+    else:
+        voice_prompt = "Added to your cart."
+
+    if session is not None:
+        _set_session_state(db, session, restaurant_id=None, category_id=None, order_id=None)
+
+    return _result(reply, restaurant_id=None, cart_summary=cart, voice_prompt=voice_prompt)
+
+
+def _haversine_miles(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    radius_miles = 3958.8
+    dlat = radians(lat2 - lat1)
+    dlng = radians(lng2 - lng1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlng / 2) ** 2
+    return 2 * radius_miles * asin(sqrt(a))
+
+
+def _restaurant_distance(restaurant, user_lat: float | None, user_lng: float | None) -> float | None:
+    if user_lat is None or user_lng is None:
         return None
-    return segments
+    if getattr(restaurant, "latitude", None) is None or getattr(restaurant, "longitude", None) is None:
+        return None
+    try:
+        return _haversine_miles(float(user_lat), float(user_lng), float(restaurant.latitude), float(restaurant.longitude))
+    except (TypeError, ValueError):
+        return None
 
 
-def _find_best_restaurant(name: str, all_restaurants) -> object | None:
+def _rank_restaurants(name: str, all_restaurants, user_lat: float | None = None, user_lng: float | None = None):
+    name_lower = name.lower().strip()
+    scored = []
+    for restaurant in all_restaurants:
+        score = max(
+            _similarity(name_lower, restaurant.name.lower()),
+            _similarity(name_lower, restaurant.slug.replace('-', ' ')),
+        )
+        restaurant_name_lower = restaurant.name.lower()
+        slug_clean = restaurant.slug.replace('-', ' ')
+        if restaurant.slug == name_lower or restaurant_name_lower == name_lower:
+            score = max(score, 1.0)
+        elif name_lower in restaurant_name_lower or restaurant_name_lower in name_lower:
+            score = max(score, 0.92)
+        elif name_lower in slug_clean or slug_clean in name_lower:
+            score = max(score, 0.9)
+        distance = _restaurant_distance(restaurant, user_lat, user_lng)
+        scored.append((restaurant, score, distance))
+    scored.sort(key=lambda row: (-row[1], row[2] if row[2] is not None else float('inf'), row[0].name.lower()))
+    return scored
+
+
+def _find_best_restaurant(name: str, all_restaurants, user_lat: float | None = None,
+                          user_lng: float | None = None) -> object | None:
     """Fuzzy match a restaurant name."""
     name_lower = name.lower().strip()
     if not name_lower:
         return None
 
-    # Exact slug or name match
-    for r in all_restaurants:
-        if r.slug == name_lower or r.name.lower() == name_lower:
-            return r
+    ascii_only = re.sub(_TAMIL_SCRIPT_RE, ' ', name_lower)
+    ascii_only = re.sub(r'\s+', ' ', ascii_only).strip()
+    if ascii_only and ascii_only != name_lower:
+        ranked_ascii = _rank_restaurants(ascii_only, all_restaurants, user_lat=user_lat, user_lng=user_lng)
+        if ranked_ascii:
+            best_ascii, best_ascii_score, _ = ranked_ascii[0]
+            if best_ascii_score >= 0.5:
+                return best_ascii
 
-    # Partial match
-    for r in all_restaurants:
-        if name_lower in r.name.lower() or r.name.lower() in name_lower:
-            return r
-        slug_clean = r.slug.replace('-', ' ')
-        if name_lower in slug_clean or slug_clean in name_lower:
-            return r
-
-    # Fuzzy match
-    best, best_score = None, 0.0
-    for r in all_restaurants:
-        score = max(
-            _similarity(name_lower, r.name.lower()),
-            _similarity(name_lower, r.slug.replace('-', ' ')),
-        )
-        if score > best_score:
-            best_score = score
-            best = r
+    ranked = _rank_restaurants(name_lower, all_restaurants, user_lat=user_lat, user_lng=user_lng)
+    if not ranked:
+        return None
+    best, best_score, _ = ranked[0]
     return best if best_score >= 0.5 else None
 
 
@@ -285,6 +556,32 @@ _CHAT_STOP_WORDS = {
     "nearby", "near", "here", "around", "cheapest", "cheap", "compare",
     "price", "best", "value", "lowest",
 }
+
+
+def _format_cross_restaurant_display_query(query: str) -> str:
+    lower = query.lower().strip()
+    raw_tokens = [token for token in re.split(r"[^a-z0-9']+", lower) if token]
+    keywords = [token for token in raw_tokens if token not in _CHAT_STOP_WORDS and len(token) >= 2]
+
+    special_tokens = {"special", "specials", "today", "todays", "today's"}
+    generic_tokens = {"something", "anything", "item", "items", "option", "options", "food", "dish", "dishes", "any"}
+
+    has_special = any(token in special_tokens for token in raw_tokens)
+    spice_terms = [token for token in keywords if token in {"spicy", "hot", "chili", "chilli", "pepper"}]
+    meaningful = [token for token in keywords if token not in special_tokens and token not in generic_tokens]
+
+    if has_special:
+        if spice_terms:
+            return f"{spice_terms[0]} specials"
+        if meaningful:
+            return " ".join(meaningful[:3])
+        return "today's specials"
+
+    if meaningful:
+        return " ".join(meaningful[:4])
+    if keywords:
+        return " ".join(keywords[:4])
+    return query.strip()
 
 
 def _edit_distance_chat(a: str, b: str) -> int:
@@ -418,6 +715,34 @@ def _token_match_score(query: str, item_name: str) -> float:
 
     # Score = ratio of matched query tokens
     return matched_tokens / len(query_tokens)
+
+
+_SPOKEN_DIGIT_WORDS = {
+    "zero": "0", "oh": "0",
+    "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9",
+}
+_QUANTITY_DIGIT_PATTERN = r'(?:20|1[0-9]|[1-9])'
+
+
+def _normalize_spoken_numeric_item_names(text: str) -> str:
+    """Convert speech forms like 'triple five' to '555' so item names aren't mistaken for quantities."""
+    normalized = re.sub(r'([a-z])([A-Z])', r'\1 \2', text.strip())
+    normalized = normalized.lower().strip()
+
+    def _repeat_digit(match: re.Match) -> str:
+        repeat_word = match.group(1)
+        digit_word = match.group(2)
+        digit = _SPOKEN_DIGIT_WORDS.get(digit_word, digit_word)
+        repeat = 3 if repeat_word == "triple" else 2
+        return digit * repeat
+
+    normalized = re.sub(
+        rf'\b(double|triple)\s+({"|".join(_SPOKEN_DIGIT_WORDS.keys())}|\d)\b',
+        _repeat_digit,
+        normalized,
+    )
+    return normalized
 
 
 def _extract_item_phrase(text: str) -> str:
@@ -576,6 +901,89 @@ def _has_add_intent(text: str) -> bool:
     return any(p in lower for p in add_phrases)
 
 
+def _is_vague_selected_restaurant_suggestion_request(text: str) -> bool:
+    """Detect vague recommendation-style prompts that should browse, not mutate the cart."""
+    lower = text.lower().strip()
+    if not lower or len(lower.split()) < 3:
+        return False
+
+    if any(token in lower for token in (
+        "clear cart", "clear the cart", "show cart", "checkout", "place order", "done",
+        "remove", "cancel order", "change the restaurant", "switch restaurant",
+    )):
+        return False
+
+    if any(token in lower for token in ("recommend", "suggest", "surprise me", "what do you have", "what have you got")):
+        return True
+
+    if re.search(r'\b(?:what|which)\b.*\b(?:available|have|special|options?)\b', lower):
+        return True
+
+    vague_markers = (
+        "something", "anything", "options", "option", "special item", "special items",
+        "special menu", "special menus", "best", "popular", "today", "today's",
+    )
+    has_vague_marker = any(marker in lower for marker in vague_markers)
+
+    if not has_vague_marker:
+        return False
+
+    generic_dish_tokens = {
+        "special", "specials", "item", "items", "option", "options", "something", "anything",
+        "food", "dish", "dishes", "today", "todays", "todays", "menu", "menus", "best",
+        "popular", "spicy", "hot", "good", "tasty", "here",
+    }
+
+    def _has_concrete_dish_name(dish_name: str | None) -> bool:
+        if not dish_name:
+            return False
+        tokens = [token for token in re.split(r'[^a-z0-9]+', dish_name.lower()) if token]
+        meaningful = [token for token in tokens if token not in generic_dish_tokens]
+        return bool(meaningful)
+
+    explicit_order_markers = (
+        "add ", "order ", "can i have", "can i get", "one ", "two ", "1 ", "2 ",
+    )
+    if any(marker in lower for marker in explicit_order_markers) and not any(token in lower for token in ("option", "options", "recommend", "suggest", "special", "today")):
+        return False
+
+    try:
+        from .intent_extractor import extract_intent_local
+
+        local_intent = extract_intent_local(text)
+        concrete_dish = _has_concrete_dish_name(local_intent.dish_name)
+        if local_intent.recommendation_mode and not concrete_dish and not local_intent.dish_category:
+            return True
+        if concrete_dish or local_intent.dish_category:
+            return False
+    except Exception:
+        pass
+
+    return has_vague_marker
+
+
+def _rank_suggestion_items(query: str, items: list[MenuItem], limit: int = 5) -> list[MenuItem]:
+    """Rank candidate suggestion items for a vague request without mutating the cart."""
+    lower = query.lower().strip()
+    matches = _find_matching_items(lower, items, limit=limit)
+    if matches:
+        return matches
+
+    spicy_words = ("spicy", "hot", "pepper", "chilli", "chili")
+    if any(word in lower for word in spicy_words):
+        spicy_matches = [item for item in items if any(word in item.name.lower() for word in spicy_words)]
+        if spicy_matches:
+            return spicy_matches[:limit]
+
+    return items[:limit]
+
+
+_CLARIFICATION_WORDS = (
+    "what", "huh", "sorry", "pardon", "eh", "repeat", "again",
+    "hello", "hey", "wait", "um", "ok", "yeah",
+)
+
+
 def _try_category_match(cleaned: str, lower: str, categories: list, session) -> "Category | None":
     """Match user input to a category (for browse/open menu). Returns category or None."""
     category_query = lower
@@ -685,13 +1093,54 @@ def _find_matching_items(query: str, all_items: list[MenuItem], limit=5) -> list
     return [item for item, _ in scored[:limit]]
 
 
+def _extract_compound_items(part: str, all_items: list[MenuItem], lead_quantity: int = 1) -> list[tuple[MenuItem, int]]:
+    """Extract multiple distinct items from one chunk when STT glues them together."""
+    compact_part = re.sub(r'[^a-z0-9]+', '', part.lower())
+    if len(compact_part) < 6:
+        return []
+
+    candidates = []
+    for item in all_items:
+        compact_name = re.sub(r'[^a-z0-9]+', '', item.name.lower())
+        if len(compact_name) < 4:
+            continue
+        start = compact_part.find(compact_name)
+        if start == -1:
+            continue
+        end = start + len(compact_name)
+        candidates.append((start, end, len(compact_name), item))
+
+    if len(candidates) < 2:
+        return []
+
+    candidates.sort(key=lambda row: (row[0], -row[2]))
+    chosen = []
+    last_end = -1
+    used_ids = set()
+    for start, end, _, item in candidates:
+        if item.id in used_ids or start < last_end:
+            continue
+        chosen.append(item)
+        used_ids.add(item.id)
+        last_end = end
+
+    if len(chosen) < 2:
+        return []
+
+    results = []
+    for idx, item in enumerate(chosen):
+        qty = lead_quantity if idx == 0 else 1
+        results.append((item, qty))
+    return results
+
+
 def _parse_order_items(text: str, all_items: list[MenuItem]) -> list[tuple[MenuItem, int]]:
     word_to_num = {
         "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4,
         "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
     }
 
-    cleaned = text.lower().strip()
+    cleaned = _normalize_spoken_numeric_item_names(text)
     for filler in ["i would like to order", "i want to order", "i'd like to order",
                    "i want", "i'd like", "i would like", "give me", "get me",
                    "can i have", "can i get", "please", "order", "add", "to order"]:
@@ -703,6 +1152,25 @@ def _parse_order_items(text: str, all_items: list[MenuItem]) -> list[tuple[MenuI
 
     parts = re.split(r'\s*(?:,\s*and|\band\b|,|&|\+)\s*', cleaned)
 
+    # Voice transcripts often chain multiple quantity-item phrases without "and" or commas,
+    # e.g. "1 biryani family pack one masala grilled fish 1 tandoori shrimp jhinga".
+    # Split on repeated quantity markers so each phrase can be matched independently.
+    if len(parts) == 1:
+        qty_markers = list(re.finditer(
+            rf'(?<!\S)({_QUANTITY_DIGIT_PATTERN}|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+',
+            cleaned,
+        ))
+        if len(qty_markers) >= 2:
+            chained_parts = []
+            for idx, marker in enumerate(qty_markers):
+                start = marker.start()
+                end = qty_markers[idx + 1].start() if idx + 1 < len(qty_markers) else len(cleaned)
+                segment = cleaned[start:end].strip(" ,")
+                if segment:
+                    chained_parts.append(segment)
+            if chained_parts:
+                parts = chained_parts
+
     results = []
     for part in parts:
         part = part.strip()
@@ -710,7 +1178,7 @@ def _parse_order_items(text: str, all_items: list[MenuItem]) -> list[tuple[MenuI
             continue
 
         quantity = 1
-        num_match = re.match(r'^(\d+)\s+(.+)', part)
+        num_match = re.match(rf'^({_QUANTITY_DIGIT_PATTERN})\s+(.+)', part)
         if num_match:
             quantity = int(num_match.group(1))
             part = num_match.group(2).strip()
@@ -724,6 +1192,11 @@ def _parse_order_items(text: str, all_items: list[MenuItem]) -> list[tuple[MenuI
         if trailing:
             part = trailing.group(1).strip()
             quantity = int(trailing.group(2))
+
+        compound_items = _extract_compound_items(part, all_items, quantity)
+        if compound_items:
+            results.extend(compound_items)
+            continue
 
         item = _find_best_item(part, all_items)
         if item:
@@ -744,9 +1217,13 @@ def _get_all_restaurant_items(db: Session, restaurant_id: int) -> list[MenuItem]
 # Main message processor
 # ---------------------------------------------------------------------------
 
-def process_message(db: Session, session: ChatSession, text: str) -> dict:
+def process_message(db: Session, session: ChatSession, text: str,
+                    user_lat: float | None = None,
+                    user_lng: float | None = None) -> dict:
     cleaned = text.strip()
     lower = cleaned.lower()
+    parsing_cleaned = cleaned
+    parsing_lower = lower
 
     # --- Group order intent (voice or text): open Group tab ---
     _group_phrases = (
@@ -904,39 +1381,75 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             voice_prompt=f"Welcome to {restaurant.name}. We have these categories: {cat_list}. Which one would you like?",
         )
 
+    current_restaurant_name = None
+    if session.restaurant_id:
+        current_restaurant = db.query(Restaurant).filter(Restaurant.id == session.restaurant_id).first()
+        current_restaurant_name = current_restaurant.name if current_restaurant else None
+    should_try_normalization = _should_try_mixed_order_normalization(cleaned, bool(current_restaurant_name))
+    if should_try_normalization:
+        _debug_log_mixed_order(
+            "attempt",
+            session_id=session.id,
+            current_restaurant=current_restaurant_name,
+            original=cleaned,
+        )
+    normalized_order_text = _normalize_mixed_voice_order_text(cleaned, current_restaurant_name=current_restaurant_name)
+    if normalized_order_text:
+        parsing_cleaned = normalized_order_text.strip()
+        parsing_lower = parsing_cleaned.lower()
+        _debug_log_mixed_order(
+            "accepted",
+            session_id=session.id,
+            current_restaurant=current_restaurant_name,
+            original=cleaned,
+            normalized=parsing_cleaned,
+        )
+    elif should_try_normalization:
+        _debug_log_mixed_order(
+            "rejected",
+            session_id=session.id,
+            current_restaurant=current_restaurant_name,
+            original=cleaned,
+            reason="normalizer_returned_empty_or_unusable_text",
+        )
+
+    # --- Multi-restaurant order: detect regardless of current session restaurant ---
+    # Run whenever the input contains 2+ "from X" patterns (covers both no-restaurant and has-restaurant sessions)
+    _from_count = len(re.findall(r'\bfrom\s+\w', parsing_lower))
+    if _from_count >= 2:
+        all_restaurants_multi = crud.list_restaurants(db)
+        found_multi, missing_multi = _parse_multi_restaurant_order(
+            parsing_cleaned,
+            parsing_lower,
+            all_restaurants_multi,
+            db,
+            session.user_id,
+            user_lat=user_lat,
+            user_lng=user_lng,
+        )
+        if found_multi is None:
+            llm_orders = extract_multi_order(cleaned)
+            if llm_orders:
+                found_multi, missing_multi = _apply_multi_order_result(
+                    db,
+                    session.user_id,
+                    llm_orders,
+                    all_restaurants_multi,
+                    user_lat=user_lat,
+                    user_lng=user_lng,
+                )
+        if found_multi is not None or missing_multi:
+            return _execute_multi_order(db, session.user_id, found_multi or [], missing_multi or [], session=session)
+
     # --- If no restaurant selected yet: try smart matching ---
     if session.restaurant_id is None:
         all_restaurants = crud.list_restaurants(db)
 
-        # Multi-restaurant order: "2 chicken biryani from Aroma and 1 chicken lollipop from Desi District"
-        multi = _parse_multi_restaurant_order(cleaned, lower, all_restaurants, db, session.user_id)
-        if multi:
-            lines = []
-            for rest, item_list in multi:
-                order = crud.get_user_order_for_restaurant(db, session.user_id, rest.id)
-                if not order:
-                    order = crud.create_order(db, session.user_id, rest.id)
-                for menu_item, qty in item_list:
-                    crud.add_order_item(db, order, menu_item, qty)
-                crud.recompute_order_total(db, order)
-                for menu_item, qty in item_list:
-                    lines.append(f"  **{rest.name}:** {qty}x {menu_item.name} — ${menu_item.price_cents * qty / 100:.2f}")
-            cart = _build_cart_summary_chat(db, session.user_id)
-            reply = "Added to your orders:\n\n" + "\n".join(lines)
-            reply += "\n\nYou have items from multiple restaurants. Go to Cart to review or add more from each."
-            rest_names = ", ".join(r.name for r, _ in multi)
-            return _result(
-                reply,
-                restaurant_id=None,
-                cart_summary=cart,
-                voice_prompt=f"Added to {rest_names}. You can add more from each restaurant or go to cart.",
-            )
+        extracted_name = _extract_restaurant_name(parsing_cleaned)
+        item_hint = _extract_item_after_restaurant(parsing_cleaned) if extracted_name else None
 
-        extracted_name = _extract_restaurant_name(cleaned)
-        item_hint = _extract_item_after_restaurant(cleaned) if extracted_name else None
-
-        candidate = extracted_name or cleaned
-        restaurant = _find_best_restaurant(candidate, all_restaurants)
+        candidate = extracted_name or parsing_cleaned
+        restaurant = _find_best_restaurant(candidate, all_restaurants, user_lat=user_lat, user_lng=user_lng)
 
         if restaurant:
             existing_order = crud.get_user_order_for_restaurant(db, session.user_id, restaurant.id)
@@ -1005,17 +1518,49 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                 voice_prompt=f"Welcome to {restaurant.name}. We have: {cat_list}. Which category would you like?",
             )
 
+        # Multi-item order from home screen: "1 X and 1 Y" with no restaurant specified
+        # Try each restaurant to see if it has all requested items
+        _home_multi = bool(re.search(r'\b(?:and|&)\b', parsing_lower)) and _has_add_intent(parsing_cleaned)
+        if _home_multi and all_restaurants:
+            for rest in all_restaurants:
+                rest_items = _get_all_restaurant_items(db, rest.id)
+                if not rest_items:
+                    continue
+                parsed_multi = _parse_order_items(parsing_cleaned, rest_items)
+                if len(parsed_multi) >= 2:
+                    order = crud.get_user_order_for_restaurant(db, session.user_id, rest.id)
+                    if not order:
+                        order = crud.create_order(db, session.user_id, rest.id)
+                    _set_session_state(db, session, restaurant_id=rest.id, order_id=order.id)
+                    crud.attach_order_to_session(db, session, order)
+                    added_lines, added_names = [], []
+                    for menu_item, qty in parsed_multi:
+                        crud.add_order_item(db, order, menu_item, qty)
+                        price = f"${menu_item.price_cents * qty / 100:.2f}"
+                        added_lines.append(f"  {qty}x {menu_item.name} - {price}")
+                        added_names.append(menu_item.name)
+                    crud.recompute_order_total(db, order)
+                    total = f"${order.total_cents / 100:.2f}"
+                    cats = _categories_data(db, rest.id)
+                    cart = _build_cart_summary_chat(db, session.user_id)
+                    voice_added = ", ".join(added_names)
+                    reply = f"Added to your order at {rest.name}:\n" + "\n".join(added_lines)
+                    reply += f"\n\nCart total: {total}"
+                    return _result(
+                        reply, restaurant_id=rest.id, order_id=order.id,
+                        categories=cats, cart_summary=cart,
+                        voice_prompt=f"Added {voice_added} from {rest.name}. Want anything else, or say done to finish?",
+                    )
+
         # No restaurant match — try cross-restaurant item search (e.g. "spicy biryani", "cheap biryani", "best combos")
-        if all_restaurants and len(cleaned) > 2:
-            cross_results = _search_items_across_restaurants(db, cleaned, all_restaurants)
+        if all_restaurants and len(parsing_cleaned) > 2:
+            cross_results = _search_items_across_restaurants(db, parsing_cleaned, all_restaurants)
             if not cross_results:
-                cross_results = _search_items_across_restaurants_relaxed(db, cleaned, all_restaurants, limit=8, min_keywords=1)
+                cross_results = _search_items_across_restaurants_relaxed(db, parsing_cleaned, all_restaurants, limit=8, min_keywords=1)
             if cross_results:
                 # Extract meaningful keywords for display
-                raw_kws = cleaned.lower().split()
-                display_kws = [kw for kw in raw_kws if kw not in _CHAT_STOP_WORDS and len(kw) >= 2]
-                display_query = " ".join(display_kws) if display_kws else cleaned
-                lines = [f'Found "{display_query}" at these restaurants:\n']
+                display_query = _format_cross_restaurant_display_query(parsing_cleaned)
+                lines = [f'Found "{display_query}" at these restaurants:', ""]
                 seen = set()
                 rest_names = []
                 for item, rest, score in cross_results:
@@ -1023,7 +1568,7 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                         lines.append(f"• **{rest.name}** — {item.name} (${item.price_cents/100:.2f})")
                         rest_names.append(rest.name)
                         seen.add(rest.id)
-                lines.append(f'\nSay the restaurant name or type #{cross_results[0][1].slug} to order!')
+                lines.extend(["", f'Say the restaurant name or type #{cross_results[0][1].slug} to order!'])
                 return _result(
                     "\n".join(lines),
                     voice_prompt=f"I found that item at: {', '.join(rest_names[:3])}. Which restaurant would you like?",
@@ -1167,16 +1712,16 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             )
 
     # --- General search while in a restaurant: "cheap biryani nearby" / "restaurants with X" ---
-    if session.restaurant_id and len(cleaned) > 3:
+    if session.restaurant_id and len(parsing_cleaned) > 3:
         discovery_hints = ("nearby", "near me", "cheap", "cheapest", "restaurants that", "restaurants with",
                           "where can i get", "where can i find", "who has", "which restaurant has")
-        if any(h in lower for h in discovery_hints):
+        if any(h in parsing_lower for h in discovery_hints):
             all_restaurants = crud.list_restaurants(db)
-            cross_results = _search_items_across_restaurants(db, cleaned, all_restaurants)
+            cross_results = _search_items_across_restaurants(db, parsing_cleaned, all_restaurants)
             if cross_results:
                 _set_session_state(db, session, restaurant_id=None, category_id=None, order_id=None)
-                display_kws = " ".join(w for w in lower.split() if w not in _CHAT_STOP_WORDS and len(w) >= 2)
-                lines = [f'Found "{display_kws}" at these restaurants:\n']
+                display_query = _format_cross_restaurant_display_query(parsing_cleaned)
+                lines = [f'Found "{display_query}" at these restaurants:', ""]
                 seen = set()
                 rest_names = []
                 for item, rest, score in cross_results:
@@ -1184,7 +1729,7 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                         lines.append(f"• **{rest.name}** — {item.name} (${item.price_cents/100:.2f})")
                         rest_names.append(rest.name)
                         seen.add(rest.id)
-                lines.append(f'\nSay the restaurant name or type #{cross_results[0][1].slug} to order!')
+                lines.extend(["", f'Say the restaurant name or type #{cross_results[0][1].slug} to order!'])
                 return _result(
                     "\n".join(lines),
                     restaurant_id=None,
@@ -1196,65 +1741,121 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
     categories = crud.list_categories(db, session.restaurant_id)
     category_items = [i for i in all_items if session.category_id and i.category_id == session.category_id]
 
-    # Short vague queries (e.g. "family means" / "family meals"): try category first so we open that menu instead of adding one item
-    if len(cleaned.split()) <= 2 and not _has_add_intent(cleaned):
-        cat_match_early = _try_category_match(cleaned, lower, categories, session)
-        if cat_match_early:
-            _set_session_state(db, session, category_id=cat_match_early.id)
-            items = _items_data(db, cat_match_early.id)
+    # --- Multi-item order: bypass category-scoped fast path when the utterance clearly
+    # contains multiple requested items, even if STT omitted "and" or commas.
+    item_parsed = []
+    _quantity_marker_count = len(re.findall(
+        r'(?<!\S)(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+',
+        parsing_lower,
+    ))
+    _has_multi_item = (
+        (bool(re.search(r'\b(?:and|&)\b', parsing_lower)) and _has_add_intent(parsing_cleaned))
+        or _quantity_marker_count >= 2
+    )
+    if _has_multi_item:
+        multi_parsed = _parse_order_items(parsing_cleaned, all_items)
+        if len(multi_parsed) >= 2:
+            item_parsed = multi_parsed
+
+    if not item_parsed:
+        # Short vague queries (e.g. "family means" / "family meals"): try category first so we open that menu instead of adding one item
+        if len(parsing_cleaned.split()) <= 2 and not _has_add_intent(parsing_cleaned):
+            single_item_early = _find_best_item(parsing_cleaned, category_items or all_items)
+            cat_match_early = None
+            if parsing_cleaned.lower().strip() not in _CLARIFICATION_WORDS and not single_item_early:
+                cat_match_early = _try_category_match(parsing_cleaned, parsing_lower, categories, session)
+            if cat_match_early:
+                _set_session_state(db, session, category_id=cat_match_early.id)
+                items = _items_data(db, cat_match_early.id)
+                return _result(
+                    f"{cat_match_early.name} — {len(items)} items. Tap + to add or tell me the item name.",
+                    restaurant_id=session.restaurant_id,
+                    category_id=cat_match_early.id,
+                    order_id=session.order_id,
+                    categories=_categories_data(db, session.restaurant_id),
+                    items=items,
+                    voice_prompt=f"{cat_match_early.name}. {len(items)} items. Which one would you like?",
+                )
+
+        if _is_vague_selected_restaurant_suggestion_request(parsing_cleaned):
+            if session.category_id and category_items:
+                current_category = next((cat for cat in categories if cat.id == session.category_id), None)
+                suggested_items = _rank_suggestion_items(parsing_cleaned, category_items)
+                item_dicts = [
+                    {
+                        "id": item.id,
+                        "name": item.name,
+                        "description": item.description or "",
+                        "price_cents": item.price_cents,
+                    }
+                    for item in suggested_items
+                ]
+                prefix = "Here are some spicy options" if "spicy" in parsing_lower else "Here are some options"
+                label = current_category.name if current_category else "this category"
+                return _result(
+                    f"{prefix} from {label}. Tap + to add or tell me which one you want.",
+                    restaurant_id=session.restaurant_id,
+                    category_id=session.category_id,
+                    order_id=session.order_id,
+                    categories=_categories_data(db, session.restaurant_id),
+                    items=item_dicts,
+                    voice_prompt=f"{prefix}. Tell me which one you want.",
+                )
+
+            cat_data = _categories_data(db, session.restaurant_id)
+            cat_names = [cat["name"] for cat in cat_data[:6]]
+            cat_list = ", ".join(cat_names)
             return _result(
-                f"{cat_match_early.name} — {len(items)} items. Tap + to add or tell me the item name.",
+                f"Pick a category and I will show you some options: {cat_list}",
                 restaurant_id=session.restaurant_id,
-                category_id=cat_match_early.id,
+                category_id=session.category_id,
                 order_id=session.order_id,
-                categories=_categories_data(db, session.restaurant_id),
-                items=items,
-                voice_prompt=f"{cat_match_early.name}. {len(items)} items. Which one would you like?",
+                categories=cat_data,
+                voice_prompt="Pick a category and I will show you some options.",
             )
 
-    # When user is viewing a category's items: try FAST path first (fuzzy/token), LLM only as fallback
-    # so e.g. "iced coffee" -> instant match; "I would like one iced coffee" -> parse_order_items or LLM
-    item_parsed = []
-    if session.category_id and category_items:
-        # Direct name match first for ANY order phrase ("I want iced coffee", "give me a cappuccino", etc.)
-        phrase = _extract_item_phrase(cleaned)
-        if phrase:
-            for item in category_items:
-                iname = item.name.lower()
-                # Full match, or item name in phrase, or phrase in item name (handles voice/typos)
-                if phrase == iname or iname in phrase or phrase in iname:
-                    item_parsed = [(item, max(1, _extract_quantity_from_message(cleaned)))]
-                    break
-            # If no exact/substring match, try longest item name contained in phrase (e.g. "large iced coffee" -> "Iced Coffee")
-            if not item_parsed and len(phrase) > 3:
-                best_item, best_len = None, 0
+        # When user is viewing a category's items: try FAST path first (fuzzy/token), LLM only as fallback
+        # so e.g. "iced coffee" -> instant match; "I would like one iced coffee" -> parse_order_items or LLM
+        if session.category_id and category_items:
+            # Direct name match first for ANY order phrase ("I want iced coffee", "give me a cappuccino", etc.)
+            phrase = _extract_item_phrase(parsing_cleaned)
+            if phrase:
                 for item in category_items:
                     iname = item.name.lower()
-                    if iname in phrase and len(iname) > best_len:
-                        best_item, best_len = item, len(iname)
-                if best_item:
-                    item_parsed = [(best_item, max(1, _extract_quantity_from_message(cleaned)))]
+                    # Full match, or item name in phrase, or phrase in item name (handles voice/typos)
+                    if phrase == iname or iname in phrase or phrase in iname:
+                        item_parsed = [(item, max(1, _extract_quantity_from_message(parsing_cleaned)))]
+                        break
+                # If no exact/substring match, try longest item name contained in phrase (e.g. "large iced coffee" -> "Iced Coffee")
+                if not item_parsed and len(phrase) > 3:
+                    best_item, best_len = None, 0
+                    for item in category_items:
+                        iname = item.name.lower()
+                        if iname in phrase and len(iname) > best_len:
+                            best_item, best_len = item, len(iname)
+                    if best_item:
+                        item_parsed = [(best_item, max(1, _extract_quantity_from_message(parsing_cleaned)))]
+            if not item_parsed:
+                item_parsed = _parse_order_items(parsing_cleaned, category_items)
+            if not item_parsed:
+                single = _find_best_item(parsing_cleaned, category_items)
+                if single:
+                    item_parsed = [(single, max(1, _extract_quantity_from_message(parsing_cleaned)))]
+            if not item_parsed:
+                llm_item = _llm_match_item(parsing_cleaned, category_items)
+                if llm_item:
+                    qty = _extract_quantity_from_message(parsing_cleaned)
+                    item_parsed = [(llm_item, max(1, qty))]
         if not item_parsed:
-            item_parsed = _parse_order_items(cleaned, category_items)
-        if not item_parsed:
-            single = _find_best_item(cleaned, category_items)
-            if single:
-                item_parsed = [(single, max(1, _extract_quantity_from_message(cleaned)))]
-        if not item_parsed:
-            llm_item = _llm_match_item(cleaned, category_items)
-            if llm_item:
-                qty = _extract_quantity_from_message(cleaned)
-                item_parsed = [(llm_item, max(1, qty))]
-    if not item_parsed:
-        item_parsed = _parse_order_items(cleaned, all_items)
-        if not item_parsed:
-            single = _find_best_item(cleaned, all_items)
-            if single:
-                item_parsed = [(single, 1)]
-        if not item_parsed:
-            llm_item = _llm_match_item(cleaned, all_items)
-            if llm_item:
-                item_parsed = [(llm_item, 1)]
+            item_parsed = _parse_order_items(parsing_cleaned, all_items)
+            if not item_parsed:
+                single = _find_best_item(parsing_cleaned, all_items)
+                if single:
+                    item_parsed = [(single, 1)]
+            if not item_parsed:
+                llm_item = _llm_match_item(parsing_cleaned, all_items)
+                if llm_item:
+                    item_parsed = [(llm_item, 1)]
 
     if item_parsed:
         order = crud.get_user_order_for_restaurant(db, session.user_id, session.restaurant_id)
@@ -1283,8 +1884,18 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             voice_prompt=f"Added {voice_added}. Want anything else, or say done to finish?",
         )
 
+    if cleaned.lower().strip() in _CLARIFICATION_WORDS:
+        cats = _categories_data(db, session.restaurant_id)
+        return _result(
+            "You can say a category name, an item to add, or **done** to finish.",
+            restaurant_id=session.restaurant_id,
+            order_id=session.order_id,
+            categories=cats,
+            voice_prompt="Say a category or item name, or say done to finish.",
+        )
+
     # --- No item match: try CATEGORY match (so user can say "starters" or "family meals" to open that menu) ---
-    cat_match = _try_category_match(cleaned, lower, categories, session)
+    cat_match = _try_category_match(parsing_cleaned, parsing_lower, categories, session)
 
     if cat_match:
         _set_session_state(db, session, category_id=cat_match.id)
@@ -1402,11 +2013,7 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
 
     if not parsed:
         # Don't treat clarification words as item search ("what", "huh" → helpful prompt)
-        _clarification_words = (
-            "what", "huh", "sorry", "pardon", "eh", "repeat", "again",
-            "hello", "hey", "wait", "um", "ok", "yeah",
-        )
-        if cleaned.lower().strip() in _clarification_words:
+        if cleaned.lower().strip() in _CLARIFICATION_WORDS:
             cats = _categories_data(db, session.restaurant_id)
             return _result(
                 "You can say a category name, an item to add, or **done** to finish.",

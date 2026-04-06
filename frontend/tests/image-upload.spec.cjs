@@ -39,8 +39,10 @@ async function setupOwnerWithRestaurant(page) {
     if (await addBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
         await addBtn.click();
         await page.waitForTimeout(500);
-        await page.locator('input').first().fill('Upload Test Restaurant');
-        const createBtn = page.locator('button').filter({ hasText: /create|save|add/i }).first();
+        const formInputs = page.locator('input');
+        await formInputs.first().fill('Upload Test Restaurant');
+        await formInputs.nth(1).fill('TestCity');
+        const createBtn = page.locator('button:has-text("Create Restaurant")').first();
         if (await createBtn.isVisible()) {
             await createBtn.click();
             await page.waitForTimeout(2000);
