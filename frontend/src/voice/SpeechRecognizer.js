@@ -14,6 +14,7 @@
  */
 
 import { vlog } from './VoiceDebugLogger.js';
+import { pipelineLog } from './VoicePipelineLog.jsx';
 
 const DEBOUNCE_MS = 1000;
 
@@ -118,6 +119,12 @@ export class SpeechRecognizer {
                 interim: interim || '(none)',
                 confidence: confidenceCount > 0 ? (confidenceSum / confidenceCount).toFixed(2) : 'N/A'
             });
+            pipelineLog('STT', interim ? `Interim: "${interim}"` : `Final: "${final}"`, {
+                final: final || null,
+                interim: interim || null,
+                confidence: confidenceCount > 0 ? +(confidenceSum / confidenceCount).toFixed(3) : null,
+                lang: this.lang,
+            });
 
             if (final) this.finalTranscript = (this.finalTranscript + ' ' + final).trim();
             if (confidenceCount > 0) this._lastConfidence = confidenceSum / confidenceCount;
@@ -132,6 +139,7 @@ export class SpeechRecognizer {
                 const textToSend = this.finalTranscript.trim();
                 const confidence = this._lastConfidence || 0;
                 vlog('IOS', 'Single-shot final → sending', { text: textToSend });
+                pipelineLog('STT', `iOS single-shot final: "${textToSend}"`, { text: textToSend, confidence, lang: this.lang });
                 this.finalTranscript = '';
                 this._lastInterim = '';
                 this._lastConfidence = 0;
@@ -148,6 +156,7 @@ export class SpeechRecognizer {
                 const textToSend = (this.finalTranscript.trim() + (pending ? ' ' + pending : '')).trim();
                 const confidence = this._lastConfidence || 0;
                 if (textToSend) {
+                    pipelineLog('STT', `Debounced final: "${textToSend}"`, { text: textToSend, confidence, debounceMs: DEBOUNCE_MS, lang: this.lang });
                     this.finalTranscript = '';
                     this._lastInterim = '';
                     this._lastConfidence = 0;
@@ -378,6 +387,7 @@ export class SpeechRecognizer {
                         const data = await resp.json();
                         const transcript = (data.transcript || '').trim();
                         vlog('STT', `Backend STT: "${transcript}"`);
+                        pipelineLog('STT', `Backend STT result: "${transcript}"`, { text: transcript, lang: this.lang, audioKB: +(blob.size / 1024).toFixed(1) });
                         if (transcript) {
                             this._receivedFinalTranscript = true;
                             this.onLiveTranscript?.(transcript);

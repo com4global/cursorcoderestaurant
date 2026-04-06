@@ -8,6 +8,8 @@
  * Used with ConversationState to maintain context across turns.
  */
 
+import { pipelineLog } from './VoicePipelineLog.jsx';
+
 // ─── Entity databases ───────────────────────────────────────────────
 const DISHES = [
     'biryani', 'pizza', 'burger', 'pasta', 'naan', 'curry', 'tikka', 'masala',
@@ -278,6 +280,18 @@ const MEAL_PLAN_PATTERNS = [
  * @returns {{ intent, entities, restaurantMatch, raw, parseTimeMs }}
  */
 export function parseIntent(text, convState = {}, restaurants = []) {
+    const result = _parseIntentInner(text, convState, restaurants);
+    pipelineLog('INTENT', `Parsed: ${result.intent}`, {
+        intent: result.intent,
+        raw: text.substring(0, 80),
+        entities: Object.keys(result.entities).length > 0 ? result.entities : null,
+        restaurantMatch: result.restaurantMatch?.name || null,
+        parseTimeMs: +result.parseTimeMs.toFixed(1),
+    });
+    return result;
+}
+
+function _parseIntentInner(text, convState = {}, restaurants = []) {
     const t = text.toLowerCase().trim();
     const start = performance.now();
     const orderLikeRestaurantFlow = detectOrderLikeRestaurantFlow(t, restaurants);
