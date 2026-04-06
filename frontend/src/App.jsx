@@ -10,6 +10,7 @@ import { APP_QUERY_ROUTES, decideAppQueryRoute, isSelectedRestaurantSuggestionRe
 import { matchCategory, matchItem } from "./voice/voiceMatch.js";
 import { trace, traceError, traceTiming } from "./voice/trace.js";
 import { INTENTS, parseIntent, shouldBypassGlobalSearch } from "./voice/IntentParser.js";
+import VoicePipelineLog, { pipelineLog } from "./voice/VoicePipelineLog.jsx";
 
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
 
@@ -332,6 +333,9 @@ export default function App() {
   const categoryStripRef = useRef(null);
   const composerDraftBeforeVoiceRef = useRef("");
   const [voiceLanguage, setVoiceLanguage] = useState("en");
+  const [showPipelineLog, setShowPipelineLog] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get('voicelog') === '1'; } catch { return false; }
+  });
   const updateComposerText = useCallback((val) => {
     setMessageText(val);
     if (val.startsWith("#")) {
@@ -796,6 +800,9 @@ export default function App() {
     if (allowItemFastPath && currentItems.length > 0 && selectedRestaurant && token) {
       const matchedItem = matchItem(currentItems, trimmed);
       trace('voice.fastPath.item.tried', { input: trimmed, matched: matchedItem?.name ?? null });
+      pipelineLog('MATCH', matchedItem ? `Fast-path item match: "${matchedItem.name}"` : `No item match for: "${trimmed.substring(0, 50)}"`, {
+        input: trimmed, matched: matchedItem?.name ?? null, availableItems: currentItems.length,
+      });
       if (matchedItem) {
         traceTiming('voice.fastPath.item.matched', t0, { item: matchedItem.name, id: matchedItem.id });
         if (voiceModeRef.current) voiceSpeakRef.current(`Added ${matchedItem.name}.`, true);
@@ -848,6 +855,9 @@ export default function App() {
       const matchedCat = matchCategory(activeCategories, trimmed);
       console.log('%c[Voice match]', 'color: #0088ff; font-weight: bold', 'input:', JSON.stringify(trimmed), '| categories:', activeCategories.map(c => (typeof c.name === 'string' ? c.name : c.name?.name ?? c.name)));
       trace('voice.fastPath.category.tried', { input: trimmed, categoryNames: activeCategories.map(c => (typeof c.name === 'string' ? c.name : c?.name?.name ?? c?.name ?? c)), matched: matchedCat?.name ?? null });
+      pipelineLog('MATCH', matchedCat ? `Fast-path category match: "${matchedCat.name}"` : `No category match for: "${trimmed.substring(0, 50)}"`, {
+        input: trimmed, matched: matchedCat?.name ?? null, availableCategories: activeCategories.length,
+      });
       if (matchedCat) {
         traceTiming('voice.fastPath.category.matched', t0, { category: matchedCat.name, id: matchedCat.id });
         setActiveCategoryName(matchedCat.name);
@@ -893,6 +903,12 @@ export default function App() {
       ];
       const validation = validateVoiceInput(trimmed, voiceConfidence, allRestsForValidation, { language: voiceLanguage });
       trace('voice.validation', { valid: validation.valid, reason: validation.reason, cleaned: validation.text, layers: validation.layers });
+      pipelineLog(validation.valid ? 'STATE' : 'WARN', `Validation: ${validation.valid ? 'PASSED' : 'REJECTED'} (${validation.reason || 'ok'})`, {
+        valid: validation.valid,
+        reason: validation.reason,
+        original: trimmed.substring(0, 60),
+        cleaned: validation.text?.substring(0, 60),
+      });
 
       // Log all layer decisions
       validation.layers.forEach(l => {
@@ -1566,10 +1582,25 @@ export default function App() {
       if (isMultiOrder) console.log('%c[IntentRouter] 🍽️ MULTI_ORDER → backend without restaurant_id constraint', 'color: #ff6600; font-weight: bold');
       traceTiming('voice.backend.sendStart', t0, { textLen: textToSend.length });
       trace('backend.send', { textToSend, session_id: payload.session_id });
+      pipelineLog('SEND', `→ Backend: "${textToSend.substring(0, 80)}"`, {
+        text: textToSend,
+        restaurantId: payload.restaurant_id || null,
+        sessionId: payload.session_id,
+        isMultiOrder,
+      });
       console.log(`%c[Backend] 📤 process_message("${textToSend}")`, 'color: #bb88ff; font-weight: bold');
       const backendT0 = performance.now();
       const res = await sendMessage(token, payload);
       traceTiming('voice.backend.response', backendT0, { replyLen: res?.reply?.length ?? 0 });
+      pipelineLog('RESPONSE', `← Backend reply: "${(res.reply || '').substring(0, 100)}"`, {
+        replyLen: res.reply?.length ?? 0,
+        voice_prompt: res.voice_prompt?.substring(0, 80) || null,
+        restaurant_id: res.restaurant_id,
+        categoriesCount: res.categories?.length ?? 0,
+        itemsCount: res.items?.length ?? 0,
+        itemNames: res.items?.slice(0, 5).map(i => i.name) ?? [],
+        hasCart: !!res.cart_summary,
+      });
       trace('backend.response', {
         session_id: res.session_id,
         restaurant_id: res.restaurant_id,
@@ -1643,6 +1674,7 @@ export default function App() {
           }, 2000);
         } else {
           console.log(`%c[TTS] 🔊 Speaking: "${voiceReply?.substring(0, 80)}..."`, 'color: #ff88ff; font-weight: bold');
+          pipelineLog('TTS', `Speaking response: "${(voiceReply || '').substring(0, 100)}"`, { textLen: voiceReply?.length });
           // Speak the voice_prompt and auto-listen after
           voiceSpeakRef.current(voiceReply, true);
         }
@@ -1651,6 +1683,7 @@ export default function App() {
       setStatus("Ready.");
     } catch (err) {
       traceError('backend.error', err, { fromVoice, text: trimmed });
+      pipelineLog('ERROR', `Backend error: ${err.message || err}`, { status: err.status, fromVoice });
       setVoiceState("idle");
       if (err.status === 401) {
         localStorage.removeItem("token"); setToken(null);
@@ -3462,6 +3495,23 @@ export default function App() {
           <span>Profile</span>
         </button>
       </nav>
+
+      {/* Voice Pipeline Debug Log Toggle */}
+      {(voiceMode || showPipelineLog) && (
+        <button
+          onClick={() => setShowPipelineLog(v => !v)}
+          style={{
+            position: 'fixed', bottom: '70px', right: '12px', zIndex: 100001,
+            width: '36px', height: '36px', borderRadius: '50%',
+            background: showPipelineLog ? '#00ccff' : '#333',
+            color: showPipelineLog ? '#000' : '#888',
+            border: 'none', fontSize: '16px', cursor: 'pointer',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+          }}
+          title="Toggle Voice Pipeline Log"
+        >🔍</button>
+      )}
+      <VoicePipelineLog visible={showPipelineLog} onClose={() => setShowPipelineLog(false)} />
     </div>
   );
 }

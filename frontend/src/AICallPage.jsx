@@ -625,12 +625,15 @@ export default function AICallPage({
 
   function handleRealtimeMessage(message) {
     const parsed = parseRealtimeProviderMessage(realtimeProviderName || "vapi", message);
-    logAICall("realtime:message", {
-      type: parsed.type,
-      status: parsed.status,
-      role: parsed.role || null,
-      textPreview: parsed.text ? parsed.text.slice(0, 120) : "",
-    });
+    // Only log messages that carry meaningful data to avoid flooding console
+    if (parsed.type || parsed.status || parsed.role || parsed.text) {
+      logAICall("realtime:message", {
+        type: parsed.type,
+        status: parsed.status,
+        role: parsed.role || null,
+        textPreview: parsed.text ? parsed.text.slice(0, 120) : "",
+      });
+    }
 
     if (parsed.role === "user" && parsed.text) {
       setLatestTranscript(parsed.text);
@@ -1175,10 +1178,11 @@ export default function AICallPage({
       clearInterval(draftPollRef.current);
       const pollSessionId = session?.session_id;
       draftPollRef.current = setInterval(async () => {
-        if (!connectedRef.current || !pollSessionId) return;
+        // Guard: only apply if still connected AND session hasn't changed
+        if (!connectedRef.current || !pollSessionId || sessionIdRef.current !== pollSessionId) return;
         try {
           const snap = await aiCallRealtimeGetDraftSummary(pollSessionId);
-          if (snap?.draft) applyDraftSnapshot(snap);
+          if (snap?.draft && sessionIdRef.current === pollSessionId) applyDraftSnapshot(snap);
         } catch { /* ignore transient errors */ }
       }, 2000);
     }
@@ -1235,6 +1239,13 @@ export default function AICallPage({
   }
 
   async function connectCall() {
+    // Synchronously kill any leftover polling and cart from a previous session
+    clearInterval(draftPollRef.current);
+    draftPollRef.current = null;
+    connectedRef.current = false;
+    setDraftCart([]);
+    setDraftTotalCents(0);
+    setPendingAction(null);
     try {
       logAICall("connect:start", { language });
       const session = await createAICallRealtimeSession({ language });
@@ -1286,6 +1297,7 @@ export default function AICallPage({
     realtimeDisconnectingRef.current = true;
     clearInterval(draftPollRef.current);
     draftPollRef.current = null;
+    connectedRef.current = false;  // Sync immediately so any in-flight poll exits early
     clearMonitorLoop();
     try {
       ignoreNextStopRef.current = true;

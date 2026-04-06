@@ -12,6 +12,8 @@ Returns dicts with:
 from __future__ import annotations
 
 import re
+import time as _time
+import json as _json
 from math import asin, cos, radians, sin, sqrt
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -24,12 +26,34 @@ from .multi_order_extractor import extract_multi_order
 
 
 # ---------------------------------------------------------------------------
+# Voice Pipeline Logger (structured, real-time)
+# ---------------------------------------------------------------------------
+from collections import deque as _deque
+
+_voice_pipeline_log = _deque(maxlen=200)
+
+
+def _pipeline_log(step: str, message: str, data: dict | None = None):
+    """Structured voice pipeline log entry — stored in memory + printed."""
+    ts = _time.strftime("%H:%M:%S") + f".{int(_time.time() * 1000) % 1000:03d}"
+    entry = {"ts": ts, "step": step, "message": message, "data": data}
+    _voice_pipeline_log.append(entry)
+    data_str = f" | {_json.dumps(data, default=str)}" if data else ""
+    print(f"[VoicePipeline] {ts} [{step}] {message}{data_str}")
+
+
+def get_voice_pipeline_log():
+    """Return recent voice pipeline log entries."""
+    return list(_voice_pipeline_log)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _result(reply, restaurant_id=None, category_id=None, order_id=None,
             categories=None, items=None, cart_summary=None, voice_prompt=None):
-    return {
+    result = {
         "reply": reply,
         "restaurant_id": restaurant_id,
         "category_id": category_id,
@@ -39,6 +63,15 @@ def _result(reply, restaurant_id=None, category_id=None, order_id=None,
         "cart_summary": cart_summary,
         "voice_prompt": voice_prompt,
     }
+    _reply_snippet = (reply or '')[:100]
+    _pipeline_log('RESPONSE', f'Reply: "{_reply_snippet}"', {
+        'reply_len': len(reply or ''),
+        'voice_prompt': (voice_prompt or '')[:80] or None,
+        'restaurant_id': restaurant_id,
+        'categories_count': len(categories) if categories else 0,
+        'items_count': len(items) if items else 0,
+    })
+    return result
 
 
 def _build_cart_summary_chat(db: Session, user_id: int) -> dict:
@@ -538,9 +571,19 @@ def _find_best_restaurant(name: str, all_restaurants, user_lat: float | None = N
 
     ranked = _rank_restaurants(name_lower, all_restaurants, user_lat=user_lat, user_lng=user_lng)
     if not ranked:
+        _pipeline_log('SEARCH', f'No restaurant match for: \"{name[:60]}\"')
         return None
     best, best_score, _ = ranked[0]
-    return best if best_score >= 0.5 else None
+    if best_score >= 0.5:
+        _pipeline_log('SEARCH', f'Restaurant matched: \"{best.name}\" (score={best_score:.2f})', {
+            'query': name[:60], 'matched': best.name, 'score': round(best_score, 2),
+            'top3': [(r.name, round(s, 2)) for r, s, _ in ranked[:3]],
+        })
+        return best
+    _pipeline_log('SEARCH', f'Restaurant match too low: \"{ranked[0][0].name}\" (score={best_score:.2f})', {
+        'query': name[:60], 'best': ranked[0][0].name, 'score': round(best_score, 2),
+    })
+    return None
 
 
 # Stop words shared with /search/menu-items in main.py
@@ -1202,6 +1245,15 @@ def _parse_order_items(text: str, all_items: list[MenuItem]) -> list[tuple[MenuI
         if item:
             results.append((item, quantity))
 
+    if results:
+        _pipeline_log('MATCH', f'Parsed {len(results)} item(s) from: \"{text[:60]}\"', {
+            'items': [(m.name, qty) for m, qty in results],
+        })
+    else:
+        _pipeline_log('MATCH', f'No items matched from: \"{text[:60]}\"', {
+            'parts_tried': [p.strip() for p in parts if p.strip()][:5],
+            'menu_size': len(all_items),
+        })
     return results
 
 
@@ -1220,10 +1272,16 @@ def _get_all_restaurant_items(db: Session, restaurant_id: int) -> list[MenuItem]
 def process_message(db: Session, session: ChatSession, text: str,
                     user_lat: float | None = None,
                     user_lng: float | None = None) -> dict:
+    _pm_t0 = _time.time()
     cleaned = text.strip()
     lower = cleaned.lower()
     parsing_cleaned = cleaned
     parsing_lower = lower
+    _pipeline_log('BACKEND', f'process_message received: \"{cleaned[:80]}\"', {
+        'text': cleaned[:120], 'session_id': session.id,
+        'restaurant_id': session.restaurant_id,
+        'has_location': user_lat is not None,
+    })
 
     # --- Group order intent (voice or text): open Group tab ---
     _group_phrases = (

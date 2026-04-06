@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from . import sarvam_service, chat, crud, models
+from .chat import _pipeline_log, get_voice_pipeline_log
 from .auth import get_current_user
 from .db import get_db
 
@@ -29,6 +30,12 @@ _stt_log = deque(maxlen=50)
 async def get_stt_log():
     """Retrieve recent STT call logs for debugging."""
     return {"logs": list(_stt_log), "count": len(_stt_log)}
+
+
+@router.get("/pipeline-log")
+async def get_pipeline_log():
+    """Retrieve recent voice pipeline log entries for real-time debugging."""
+    return {"logs": get_voice_pipeline_log(), "count": len(get_voice_pipeline_log())}
 
 
 # ---------- STT ----------
@@ -63,6 +70,7 @@ async def speech_to_text(file: UploadFile = File(...), language: str = Form("en-
     }
 
     print(f"[STT] ← {audio_kb:.1f}KB | file={filename} | lang={lang}")
+    _pipeline_log('STT', f'STT request: {audio_kb:.1f}KB, lang={lang}', {'filename': filename, 'content_type': content_type, 'audio_kb': round(audio_kb, 1), 'lang': lang})
 
     if len(audio_bytes) == 0:
         log_entry["error"] = "Empty audio"
@@ -88,6 +96,7 @@ async def speech_to_text(file: UploadFile = File(...), language: str = Form("en-
         log_entry["duration_ms"] = round(elapsed)
 
         print(f"[STT] → \"{transcript}\" | detected={detected} | ⏱{elapsed:.0f}ms")
+        _pipeline_log('STT', f'STT result: "{transcript}"', {'transcript': transcript, 'detected_lang': detected, 'duration_ms': round(elapsed), 'audio_kb': round(audio_kb, 1)})
         _stt_log.append(log_entry)
         return result
     except RuntimeError as e:
@@ -95,6 +104,7 @@ async def speech_to_text(file: UploadFile = File(...), language: str = Form("en-
         log_entry["error"] = str(e)[:200]
         log_entry["duration_ms"] = round(elapsed)
         print(f"[STT] ✗ {str(e)[:100]} | ⏱{elapsed:.0f}ms")
+        _pipeline_log('ERROR', f'STT failed: {str(e)[:100]}', {'duration_ms': round(elapsed)})
         _stt_log.append(log_entry)
         raise HTTPException(502, str(e))
 
@@ -133,7 +143,9 @@ async def text_to_speech(req: TTSRequest):
             speaker=req.speaker,
         )
         elapsed = (time.time() - t0) * 1000
-        print(f"[TTS] \u23f1 {elapsed:.0f}ms | lang={lang} | text=\"{req.text[:60]}{'...' if len(req.text) > 60 else ''}\"")
+        tts_text_snippet = req.text[:60] + ('...' if len(req.text) > 60 else '')
+        print(f"[TTS] \u23f1 {elapsed:.0f}ms | lang={lang} | text=\"{tts_text_snippet}\"")
+        _pipeline_log('TTS', f'TTS generated: {elapsed:.0f}ms', {'text': req.text[:80], 'lang': lang, 'speaker': req.speaker, 'duration_ms': round(elapsed)})
         return result
     except RuntimeError as e:
         raise HTTPException(502, str(e))

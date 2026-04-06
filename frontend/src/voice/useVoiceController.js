@@ -15,6 +15,7 @@ import { TTSPlayer } from './TTSPlayer.js';
 import { parseIntent } from './IntentParser.js';
 import { trace, traceError } from './trace.js';
 import { vlog } from './VoiceDebugLogger.js';
+import { pipelineLog } from './VoicePipelineLog.jsx';
 
 const STATES = { IDLE: 'idle', LISTENING: 'listening', PROCESSING: 'processing', SPEAKING: 'speaking' };
 
@@ -140,6 +141,7 @@ export function useVoiceController({
         const confStr = confidence > 0 ? (confidence * 100).toFixed(0) + '%' : 'N/A';
         trace('voice.finalTranscript', { text, confidence: confStr });
         vlog('STT', `Final: "${text}" (${confStr})`);
+        pipelineLog('STT', `Final transcript: "${text}"`, { text, confidence: confStr, lang: languageRef.current });
 
         if (holdToTextModeRef.current) {
             setVoiceTranscript(text);
@@ -154,11 +156,14 @@ export function useVoiceController({
 
         if (doSendRef?.current) {
             vlog('STATE', `→ doSend: "${text.substring(0, 50)}"`);
+            pipelineLog('SEND', `Sending to backend: "${text.substring(0, 80)}"`, { text, fromVoice: true, confidence });
             try {
                 await doSendRef.current(text, true, confidence);
+                pipelineLog('SEND', 'doSend completed successfully');
             } catch (err) {
                 traceError('voice.doSendError', err, { text: text.substring(0, 60) });
                 vlog('ERR', `doSend error: ${err.message}`);
+                pipelineLog('ERROR', `doSend failed: ${err.message}`, { text: text.substring(0, 60) });
             }
         }
     }, [doSendRef, onTranscriptReady, resetVoiceSession]);
@@ -169,6 +174,7 @@ export function useVoiceController({
         if (!recognizer) return;
 
         vlog('STT', 'startListening()');
+        pipelineLog('MIC', 'Starting microphone / speech recognition', { lang: languageRef.current });
         heardSpeechRef.current = false;
 
         recognizer.setLang(toLanguageCode(languageRef.current));
@@ -218,6 +224,7 @@ export function useVoiceController({
         if (!voiceModeRef.current || !text) return;
         ttsPlayerRef.current?.stop();
         vlog('TTS', `speak(): "${(text || '').substring(0, 60)}"`);
+        pipelineLog('TTS', `Speaking: "${(text || '').substring(0, 100)}"`, { textLen: text?.length, lang: languageRef.current });
         setVoiceState(STATES.SPEAKING);
 
         const player = ttsPlayerRef.current;
